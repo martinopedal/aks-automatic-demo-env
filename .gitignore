@@ -1,0 +1,10 @@
+# Terraform local working files
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+crash.log
+
+# Local editor and OS noise
+.DS_Store
+Thumbs.db
