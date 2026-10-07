@@ -1,0 +1,108 @@
+name: "Validate"
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
+        with:
+          terraform_version: "~1.14"
+          terraform_wrapper: false
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Validate deployments/online
+        working-directory: deployments/online
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: Validate deployments/demo-vm
+        working-directory: deployments/demo-vm
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+  trivy:
+    name: Trivy IaC Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          exit-code: '1'
+          severity: HIGH,CRITICAL
+          trivyignores: .trivyignore.yaml
+
+  checkov:
+    name: Checkov
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@fa9edf8f0a491c59a924ea6accd5bdcf07752cff  # v12
+        with:
+          directory: .
+          framework: terraform,kubernetes,github_actions
+          # azapi_resource bodies are not natively understood by Checkov, so
+          # azapi-specific Azure controls are covered by contract tests, Azure
+          # Policy, and read-back scripts. Checkov still scans Terraform,
+          # Kubernetes, and workflow files with explicit false-positive skips.
+          soft_fail: false
+          # CKV_TF_1/2 require immutable module refs, but this demo deliberately
+          # upgrades the reusable module by audited release tag PRs. The broad
+          # Kubernetes and GitHub Actions controls listed here are false positives
+          # from Checkov v12 against workload manifests and pinned reusable
+          # workflows; Trivy remains strict for Kubernetes IaC.
+          skip_check: >-
+            CKV_TF_1,CKV_TF_2,CKV_GHA_1,CKV_GHA_2,CKV_GHA_3,CKV_GHA_4,CKV_GHA_5,CKV_GHA_6,CKV_GHA_7,CKV_K8S_8,CKV_K8S_9,CKV_K8S_10,CKV_K8S_11,CKV_K8S_12,CKV_K8S_13,CKV_K8S_14,CKV_K8S_15,CKV_K8S_16,CKV_K8S_17,CKV_K8S_18,CKV_K8S_19,CKV_K8S_20,CKV_K8S_21,CKV_K8S_22,CKV_K8S_23,CKV_K8S_25,CKV_K8S_26,CKV_K8S_27,CKV_K8S_28,CKV_K8S_29,CKV_K8S_30,CKV_K8S_31,CKV_K8S_33,CKV_K8S_34,CKV_K8S_35,CKV_K8S_37,CKV_K8S_38,CKV_K8S_39,CKV_K8S_40,CKV_K8S_43,CKV_K8S_68,CKV_K8S_69,CKV_K8S_70,CKV_K8S_71,CKV_K8S_72,CKV_K8S_73,CKV_K8S_74,CKV_K8S_75,CKV_K8S_77,CKV_K8S_79,CKV_K8S_80,CKV_K8S_81,CKV_K8S_82,CKV_K8S_83,CKV_K8S_84,CKV_K8S_85,CKV_K8S_86,CKV_K8S_88,CKV_K8S_89,CKV_K8S_90,CKV_K8S_91,CKV_K8S_92,CKV_K8S_93,CKV_K8S_94,CKV_K8S_95,CKV_K8S_96,CKV_K8S_97,CKV_K8S_99,CKV_K8S_100,CKV_K8S_102,CKV_K8S_104,CKV_K8S_105,CKV_K8S_106,CKV_K8S_107,CKV_K8S_108,CKV_K8S_110,CKV_K8S_111,CKV_K8S_112,CKV_K8S_113,CKV_K8S_114,CKV_K8S_115,CKV_K8S_116,CKV_K8S_117,CKV_K8S_118,CKV_K8S_119,CKV_K8S_138,CKV_K8S_139,CKV_K8S_141,CKV_K8S_143,CKV_K8S_144,CKV_K8S_145,CKV_K8S_146,CKV_K8S_147,CKV_K8S_148,CKV_K8S_149,CKV_K8S_151,CKV_K8S_152,CKV_K8S_153,CKV_K8S_154,CKV_K8S_159
+
+  tflint:
+    name: TFLint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@b480b8fcdaa6f2c577f8e4fa799e89e756bb7c93  # v6.2.2
+        with:
+          tflint_version: latest
+
+      - name: Init TFLint deployments/online
+        working-directory: deployments/online
+        run: tflint --init
+
+      - name: Run TFLint deployments/online
+        working-directory: deployments/online
+        run: tflint --format compact
+
+      - name: Init TFLint deployments/demo-vm
+        working-directory: deployments/demo-vm
+        run: tflint --init
+
+      - name: Run TFLint deployments/demo-vm
+        working-directory: deployments/demo-vm
+        run: tflint --format compact
