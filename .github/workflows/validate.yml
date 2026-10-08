@@ -62,7 +62,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
       - name: Run Checkov
-        uses: bridgecrewio/checkov-action@fa9edf8f0a491c59a924ea6accd5bdcf07752cff  # v12
+        uses: bridgecrewio/checkov-action@cc0e17d456ef1713bbfd963ebac19dc776775cb2  # v12
         with:
           directory: .
           framework: terraform,kubernetes,github_actions
