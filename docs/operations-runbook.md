@@ -22,7 +22,7 @@ $env:AZURE_SUBSCRIPTION_ID_ONLINE = '<set in your shell only>'
 |---|---|
 | `scripts/start-online-runner.ps1` | Starts one execution of the ephemeral, VNet-integrated self-hosted runner (Container Apps Job, no managed identity). State is private-endpoint only, so every run needs it. |
 | `scripts/Invoke-GatedRun.ps1` | Dispatches a workflow, waits until GitHub has registered the environment gate, approves it, confirms the approval took effect, waits for the result (status line about every 5 minutes), and prints the plan, apply, and proof lines plus a password-leak check. |
-| `scripts/Test-OnlineSecurity.ps1` | 28 read-back checks of the Online cluster: SKU, identity, network, platform, state, negative tests from the internet, app HTTPS and redirect, policy summary. Prints the app URL. Exit 1 on any failure. |
+| `scripts/Test-OnlineSecurity.ps1` | 29 read-back checks of the Online cluster: SKU, identity, network, platform, state, negative tests from the internet, app hostname DNS, HTTPS and redirect, policy summary. Prints the app URL. Exit 1 on any failure. |
 | `scripts/Test-DemoVm.ps1` | 14 checks of the demo VM: Bastion tunnel and RDP handshake, NAT egress IP, GitHub, WinGet, and npm reachability, WinGet, PowerShell 7, Entra join, and a clean start (no Git, Copilot CLI, Squad, or demo clone in any profile). Exit 1 on any failure. |
 | `scripts/Connect-DemoVm.ps1` | Opens a native RDP session through Bastion with Entra sign-in and MFA. |
 
@@ -44,6 +44,20 @@ The workflow runs plan, apply, app deploy, and proof in one gated job, so the ga
 The demo VM uses the same pattern with `-Workflow deploy-demo-vm.yml` and `-Inputs 'action=plan'`, `'action=apply'`, `'action=recreate-vm'`, or `'action=destroy'`, followed by `./scripts/Test-DemoVm.ps1`.
 
 A healthy steady state is `No changes. Your infrastructure matches the configuration.` on a plan-only run.
+
+## Online app hostname
+
+The app is served at `https://aks-online-demo.swedencentral.cloudapp.azure.com/` by a dedicated App Routing NGINX controller (`manifests/online/ingress-controller.yaml`) whose load balancer carries the Azure DNS label `aks-online-demo`. TLS uses the NGINX default self-signed certificate, so browsers show a warning: accept it once before presenting.
+
+## Pipeline permissions created outside Terraform
+
+The pipeline identity cannot grant itself rights, so these were created once by an administrator and are removed at teardown:
+
+| Grant | Scope | Why |
+|---|---|---|
+| Role Based Access Control Administrator with an ABAC condition (Network Contributor to service principals only) | `rg-aks-online-demo` | The root grants the cluster identity Network Contributor on the VNet |
+| Role Based Access Control Administrator with an ABAC condition (two VM sign-in roles to users only) | `rg-demo-vm-online` | VM sign-in roles for presenters |
+| Custom role `AKS App Routing Controller Writer (online demo)` (`customresources/read` and `write`) with an ABAC condition limited to `approuting.kubernetes.azure.com` / `nginxingresscontrollers` | the AKS cluster | `NginxIngressController` is cluster-scoped; AKS RBAC Writer covers namespaced objects only. The custom-resource ABAC attributes are an AKS preview feature |
 
 ## Demo VM
 
@@ -68,4 +82,4 @@ A healthy steady state is `No changes. Your infrastructure matches the configura
 1. `./scripts/Invoke-GatedRun.ps1 -Workflow deploy-demo-vm.yml -Inputs 'action=destroy' -StartRunner`
 2. `deploy-online.yml` deliberately has no destroy input, so a mis-dispatched run cannot remove the cluster before the session. After 2026-10-14, add a gated `destroy` input in a pull request (mirroring `deploy-demo-vm.yml`), review its plan-only output, then run it through `Invoke-GatedRun.ps1`.
 3. **Policy-created backup vault.** `Deploy-VM-Backup` creates a Recovery Services vault (`RSVault-swedencentral-*`) in `rg-demo-vm-online` and may enroll the VM. Terraform does not own it. If the VM was enrolled: `az backup protection disable --delete-backup-data true --yes`. Soft delete is enabled with enhanced security (14 days), so the vault can be deleted only after the soft-deleted items expire. **Start teardown by 2026-10-17** to finish by the 31st.
-4. Remove role assignments and the `DEMO_VM_*` environment variables, then confirm both resource groups contain nothing billable.
+4. Remove role assignments (including the custom role assignment on the cluster and the custom role definition `AKS App Routing Controller Writer (online demo)`) and the `DEMO_VM_*` environment variables, then confirm both resource groups contain nothing billable.
