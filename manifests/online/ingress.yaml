@@ -1,7 +1,10 @@
 # Standard networking.k8s.io/v1 Ingress consumed by the AKS managed NGINX
-# "Application Routing" add-on (enable_managed_nginx = true). The add-on
-# provisions its own public Standard Load Balancer frontend; no AGC/ALB
-# controller or delegated subnet is required.
+# "Application Routing" add-on (enable_managed_nginx = true), through the
+# dedicated controller in ingress-controller.yaml. That controller's public
+# Standard Load Balancer frontend carries the Azure DNS label, so the app is
+# reachable at https://aks-online-demo.swedencentral.cloudapp.azure.com/.
+# No host rule: the bare IP keeps working too. No AGC/ALB controller or
+# delegated subnet is required.
 #
 # HTTPS only: force-ssl-redirect sends HTTP to HTTPS. With no TLS secret,
 # NGINX serves its default self-signed certificate (use `curl -k`). For
@@ -15,7 +18,7 @@ metadata:
   annotations:
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
 spec:
-  ingressClassName: webapprouting.kubernetes.azure.com
+  ingressClassName: online-demo
   tls:
     - {}
   rules:

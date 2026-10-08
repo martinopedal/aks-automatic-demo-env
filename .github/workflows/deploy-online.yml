@@ -170,11 +170,20 @@ jobs:
       - name: Prove the app is reachable over HTTPS only
         if: inputs.apply
         run: |
-          ADDRESS=""
-          for i in $(seq 1 30); do
+          # The dedicated controller's DNS label gives the stable hostname.
+          LABEL=$(kubectl get nginxingresscontroller online-demo -o jsonpath='{.spec.loadBalancerAnnotations.service\.beta\.kubernetes\.io/azure-dns-label-name}')
+          LOCATION=$(az aks show --resource-group rg-aks-online-demo --name aks-online-demo --query location -o tsv)
+          FQDN="$LABEL.$LOCATION.cloudapp.azure.com"
+
+          # Wait until the Ingress reports the new controller's address and
+          # the FQDN resolves to that same address (a class switch can leave
+          # the previous controller's IP in the status for a short while).
+          ADDRESS=""; RESOLVED=""
+          for i in $(seq 1 40); do
             ADDRESS=$(kubectl get ingress online-demo -n online-demo -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-            [ -n "$ADDRESS" ] && break
-            echo "Waiting for ingress address ($i/30)"; sleep 10
+            RESOLVED=$(getent hosts "$FQDN" | awk '{print $1}' | head -n1)
+            [ -n "$ADDRESS" ] && [ "$ADDRESS" = "$RESOLVED" ] && break
+            echo "Waiting for ingress address and DNS ($i/40): ingress=$ADDRESS dns=$RESOLVED"; sleep 15
           done
           [ -n "$ADDRESS" ] || { echo "::error::Ingress has no public address"; exit 1; }
 
@@ -184,7 +193,7 @@ jobs:
           # (force-ssl-redirect); the http:// code is reported for reference.
           HTTPS_CODE=""
           for i in $(seq 1 30); do
-            HTTPS_CODE=$(curl -sk -o body.html -w '%{http_code}' --max-time 10 "https://$ADDRESS/" || true)
+            HTTPS_CODE=$(curl -sk -o body.html -w '%{http_code}' --max-time 10 "https://$FQDN/" || true)
             [ "$HTTPS_CODE" = "200" ] && break
             echo "Waiting for HTTPS 200 ($i/30), got $HTTPS_CODE"; sleep 10
           done
@@ -197,15 +206,17 @@ jobs:
             echo "### Online demo app"
             echo "| Check | Result |"
             echo "| --- | --- |"
-            echo "| Ingress public IP | \`$ADDRESS\` |"
-            echo "| \`https://\` response | $HTTPS_CODE (expect 200) |"
+            echo "| App URL | \`https://$FQDN/\` |"
+            echo "| DNS resolves to ingress IP | \`$RESOLVED\` = \`$ADDRESS\` |"
+            echo "| \`https://\` response (by hostname) | $HTTPS_CODE (expect 200) |"
             echo "| Page title | $(grep -o '<title>[^<]*' body.html | sed 's/<title>//') |"
             echo "| Ingress \`force-ssl-redirect\` | $REDIRECT (expect true) |"
-            echo "| Ingress TLS configured | $([ -n "$TLS" ] && echo yes || echo no) |"
+            echo "| Ingress TLS configured | $([ -n "$TLS" ] && echo yes || echo no) (NGINX default self-signed certificate) |"
             echo "| \`http://\` from runner | $HTTP_CODE (runner egress is 443-only; 000 expected) |"
             echo "| Cluster egress (NAT Gateway) | \`$EGRESS\` |"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
+          [ "$ADDRESS" = "$RESOLVED" ] || { echo "::error::$FQDN does not resolve to the ingress address"; exit 1; }
           [ "$HTTPS_CODE" = "200" ] || { echo "::error::HTTPS did not return 200"; exit 1; }
           [ "$REDIRECT" = "true" ] || { echo "::error::Ingress does not force HTTPS"; exit 1; }
           [ -n "$TLS" ] || { echo "::error::Ingress has no TLS section"; exit 1; }

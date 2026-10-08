@@ -1,7 +1,7 @@
 #Requires -Version 7
 <#
 .SYNOPSIS
-    Outside-in security validation of the Online AKS demo (28 checks).
+    Outside-in security validation of the Online AKS demo (29 checks).
 .DESCRIPTION
     Run from an operator machine, OUTSIDE the pipeline. Positive checks
     prove the deployment; negative checks prove the controls actually block
@@ -14,7 +14,8 @@ param(
     [string]$Subscription = $env:AZURE_SUBSCRIPTION_ID_ONLINE,
     [string]$Rg = 'rg-aks-online-demo',
     [string]$Cluster = 'aks-online-demo',
-    [string]$StateAccount = 'stonlinedemotfst01'
+    [string]$StateAccount = 'stonlinedemotfst01',
+    [string]$DnsLabel = 'aks-online-demo'
 )
 $ErrorActionPreference = 'Continue'
 if (-not $Subscription) { throw 'Set -Subscription or $env:AZURE_SUBSCRIPTION_ID_ONLINE.' }
@@ -68,10 +69,13 @@ Add-Check 'Negative' 'API server from non-allow-listed IP' 'no connection' "http
 $blob = curl.exe -s -o NUL -w '%{http_code}' --max-time 8 "https://$StateAccount.blob.core.windows.net/tfstate?restype=container&comp=list"
 Add-Check 'Negative' 'State storage from internet (anonymous)' '403 (blocked)' $blob ($blob -in '403','409','000')
 
-# App reachability from the internet
-$ip = (az network public-ip list -g $aks.nodeResourceGroup --subscription $Subscription -o json 2>$null | ConvertFrom-Json | Where-Object { $_.tags.'k8s-azure-service' -eq 'app-routing-system/nginx' }).ipAddress
-$http = curl.exe -s -o NUL -w '%{http_code}' --max-time 10 "http://$ip/"
-$https = curl.exe -sk -o NUL -w '%{http_code}' --max-time 10 "https://$ip/"
+# App reachability from the internet, by the Azure-provided hostname
+$pip = az network public-ip list -g $aks.nodeResourceGroup --subscription $Subscription -o json 2>$null | ConvertFrom-Json | Where-Object { $_.dnsSettings.domainNameLabel -eq $DnsLabel }
+$fqdn = $pip.dnsSettings.fqdn; $ip = $pip.ipAddress
+$resolved = (Resolve-DnsName $fqdn -Type A -ErrorAction SilentlyContinue | Where-Object Type -eq 'A' | Select-Object -First 1).IPAddress
+Add-Check 'App' 'Hostname resolves to the ingress IP' "$DnsLabel.<region>.cloudapp.azure.com -> ingress IP" "$fqdn -> $resolved" ($fqdn -and $resolved -and $resolved -eq $ip)
+$http = curl.exe -s -o NUL -w '%{http_code}' --max-time 10 "http://$fqdn/"
+$https = curl.exe -sk -o NUL -w '%{http_code}' --max-time 10 "https://$fqdn/"
 Add-Check 'App' 'HTTP redirects to HTTPS' '308' $http ($http -eq '308')
 Add-Check 'App' 'HTTPS serves the app' '200' $https ($https -eq '200')
 
@@ -81,7 +85,7 @@ $nc = $pol.results.nonCompliantResources
 Add-Check 'Policy' 'Non-compliant resources in RG (Azure Policy)' 'report' $nc $true
 
 $rows | Format-Table -AutoSize | Out-String -Width 220
-"App URL: https://$ip/ (NGINX default certificate: the browser shows a warning; accept it before presenting)"
+"App URL: https://$fqdn/ (NGINX default self-signed certificate: the browser shows a warning; accept it before presenting)"
 "PASS: $(@($rows | Where-Object Result -eq 'PASS').Count)  FAIL: $(@($rows | Where-Object Result -eq 'FAIL').Count)"
 if (@($rows | Where-Object Result -eq 'FAIL').Count -gt 0) { exit 1 }
 

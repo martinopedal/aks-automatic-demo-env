@@ -1,0 +1,19 @@
+# Dedicated App Routing NGINX controller for the demo app. Its only purpose
+# is a stable Azure-provided hostname: the azure-dns-label-name annotation
+# gives the controller's public IP the FQDN
+#   aks-online-demo.swedencentral.cloudapp.azure.com
+# TLS still uses the NGINX default (self-signed) certificate.
+#
+# NginxIngressController is a cluster-scoped custom resource. The pipeline
+# identity may write it only through a custom role whose assignment carries
+# an ABAC condition limited to approuting.kubernetes.azure.com /
+# nginxingresscontrollers (docs/operations-runbook.md).
+apiVersion: approuting.kubernetes.azure.com/v1alpha1
+kind: NginxIngressController
+metadata:
+  name: online-demo
+spec:
+  ingressClassName: online-demo
+  controllerNamePrefix: online-demo
+  loadBalancerAnnotations:
+    service.beta.kubernetes.io/azure-dns-label-name: aks-online-demo

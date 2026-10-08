@@ -2,6 +2,7 @@
 
 ## 2026-10-08
 
+- Online app: dedicated App Routing NGINX controller with the Azure DNS label `aks-online-demo`, so the app is served at `https://aks-online-demo.swedencentral.cloudapp.azure.com/` (still the NGINX default self-signed certificate). The proof step and `Test-OnlineSecurity.ps1` (now 29 checks) test by hostname and require DNS to resolve to the ingress IP.
 - Online root: scope the Network Contributor role definition lookup to the subscription so the role assignment matches the ID ARM stores (removes a perpetual in-place change on `ra_cluster_vnet` after the move).
 
 ## 2026-10-07
