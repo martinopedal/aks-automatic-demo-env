@@ -29,9 +29,18 @@
   .card li { margin:4px 0; }
   .card li::marker { color:var(--cyan); }
   .note { margin-top:28px; border-left:3px solid var(--cyan); padding:10px 16px; color:var(--muted); font-size:14px; background:var(--ink2); border-radius:0 8px 8px 0; }
+  .speakers { display:grid; grid-template-columns:repeat(2,1fr); gap:14px; }
+  .speaker { display:flex; gap:18px; align-items:center; background:var(--ink2); border:1px solid var(--line); border-radius:12px; padding:18px 20px; }
+  .speaker img, .speaker .initials { width:84px; height:84px; border-radius:50%; flex:none; border:2px solid var(--cyan); object-fit:cover; }
+  .speaker .initials { display:flex; align-items:center; justify-content:center; font-weight:700; font-size:28px; color:var(--cyan); background:var(--ink); }
+  .speaker h3 { font-size:18px; margin-bottom:2px; }
+  .speaker p { color:var(--muted); font-size:14px; margin-bottom:8px; }
+  .links { display:flex; flex-wrap:wrap; gap:8px; }
+  .links a { font-size:13px; border:1px solid var(--line); border-radius:999px; padding:3px 12px; }
+  .links a:hover { border-color:var(--cyan); text-decoration:none; }
   footer { margin-top:44px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:14px; display:flex; flex-wrap:wrap; justify-content:space-between; gap:10px; }
   a { color:var(--cyan); text-decoration:none; } a:hover { text-decoration:underline; }
-  @media (max-width:900px) { ol.flow { grid-template-columns:repeat(2,1fr); } .grid { grid-template-columns:1fr; } }
+  @media (max-width:900px) { ol.flow { grid-template-columns:repeat(2,1fr); } .grid, .speakers { grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
@@ -80,8 +89,34 @@
 
   <p class="note">Your browser warned you about the certificate. That's deliberate: the demo uses the ingress default self-signed certificate. In production, put a CA-issued certificate in Key Vault and let the App Routing add-on serve it.</p>
 
+  <h2>Your speakers</h2>
+  <div class="speakers">
+    <div class="speaker">
+      <img src="/martin.jpg" alt="Martin Opedal" width="84" height="84">
+      <div>
+        <h3>Martin Opedal</h3>
+        <p>Cloud Solution Architect, Microsoft</p>
+        <div class="links">
+          <a href="https://www.opedal.tech">opedal.tech</a>
+          <a href="https://www.linkedin.com/in/martin-opedal">LinkedIn</a>
+          <a href="https://github.com/martinopedal">GitHub</a>
+        </div>
+      </div>
+    </div>
+    <div class="speaker">
+      <span class="initials" aria-hidden="true">HF</span>
+      <div>
+        <h3>Haflidi Fridthjofsson</h3>
+        <p>Sr Cloud Solution Architect, Microsoft</p>
+        <div class="links">
+          <a href="https://github.com/haflidif">GitHub</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <footer>
-    <span>Martin &amp; Haflidi &middot; NIC 2026, Oslo</span>
+    <span>NIC 2026, Oslo &middot; <a href="https://www.opedal.tech">opedal.tech</a></span>
     <span>Code: <a href="https://github.com/martinopedal/aks-automatic-demo-env">aks-automatic-demo-env</a> &middot; module <a href="https://github.com/martinopedal/terraform-azapi-aks-automatic">terraform-azapi-aks-automatic</a></span>
   </footer>
 </main>
