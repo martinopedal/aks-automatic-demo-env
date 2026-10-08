@@ -1,0 +1,159 @@
+name: "Deploy Squad on ACA (optional)"
+
+# Optional NIC 2026 side-track deployment for Haflidi's Squad on ACA design.
+# This deliberately uses a separate runner label and separate resource group.
+# Do not run it on the shared aks-online-demo runner or in existing demo RGs.
+#
+# Before dispatching, start a separate ephemeral runner execution, for example:
+#   scripts/start-online-runner.ps1 -ResourceGroup rg-squad-on-aca-demo -JobName caj-squad-on-aca-runner -Repo martinopedal/aks-automatic-demo-env
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "plan | apply | destroy"
+        required: true
+        default: plan
+        type: choice
+        options: [plan, apply, destroy]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-squad-on-aca
+  cancel-in-progress: false
+
+env:
+  ARM_USE_OIDC: true
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_SQUAD_ACA }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID_SQUAD_ACA }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID_SQUAD_ACA }}
+  TF_VAR_resource_suffix: ${{ vars.SQUAD_ON_ACA_RESOURCE_SUFFIX }}
+  TF_VAR_vnet_address_prefix: ${{ vars.SQUAD_ON_ACA_VNET_ADDRESS_PREFIX }}
+  TF_VAR_aca_subnet_prefix: ${{ vars.SQUAD_ON_ACA_ACA_SUBNET_PREFIX }}
+  TF_VAR_private_endpoint_subnet_prefix: ${{ vars.SQUAD_ON_ACA_PRIVATE_ENDPOINT_SUBNET_PREFIX }}
+  TF_VAR_github_app_id: ${{ vars.SQUAD_ON_ACA_GITHUB_APP_ID }}
+  TF_VAR_github_app_installation_id: ${{ vars.SQUAD_ON_ACA_GITHUB_APP_INSTALLATION_ID }}
+  TF_VAR_target_repositories: ${{ vars.SQUAD_ON_ACA_TARGET_REPOSITORIES_JSON || '["martinopedal/aks-automatic-demo-env"]' }}
+
+jobs:
+  deploy:
+    name: Squad on ACA ${{ inputs.action }}
+    runs-on: [self-hosted, squad-on-aca-demo]
+    timeout-minutes: 75
+    environment: squad-aca
+    defaults:
+      run:
+        working-directory: deployments/squad-on-aca
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
+        with:
+          terraform_version: "~1.14"
+          terraform_wrapper: false
+
+      - name: Install Azure CLI
+        run: |
+          if ! command -v az &> /dev/null; then
+            curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+          fi
+          az version
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43  # v3.0.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_SQUAD_ACA }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID_SQUAD_ACA }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID_SQUAD_ACA }}
+
+      - name: Optional Terraform variables
+        run: |
+          if [ -n "${{ vars.SQUAD_ON_ACA_AGENT_IMAGE }}" ]; then
+            echo "TF_VAR_agent_image=${{ vars.SQUAD_ON_ACA_AGENT_IMAGE }}" >> "$GITHUB_ENV"
+          fi
+          if [ "${{ vars.SQUAD_ON_ACA_MANAGE_ROLE_ASSIGNMENTS }}" = "true" ]; then
+            echo "TF_VAR_manage_runtime_role_assignments=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Terraform Init
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${{ vars.SQUAD_ACA_TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.SQUAD_ACA_TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.SQUAD_ACA_TFSTATE_CONTAINER_NAME }}" \
+            -backend-config="key=squad-on-aca.tfstate" \
+            -backend-config="subscription_id=${{ vars.AZURE_SUBSCRIPTION_ID_SQUAD_ACA }}" \
+            -backend-config="tenant_id=${{ vars.AZURE_TENANT_ID_SQUAD_ACA }}" \
+            -backend-config="client_id=${{ vars.AZURE_CLIENT_ID_SQUAD_ACA }}" \
+            -backend-config="use_oidc=true" \
+            -backend-config="use_azuread_auth=true"
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          set +e
+          ARGS=()
+          if [ "${{ inputs.action }}" = "destroy" ]; then
+            ARGS=(-destroy)
+          fi
+          terraform plan -input=false -out=tfplan -detailed-exitcode "${ARGS[@]}"
+          ec=$?
+          echo "exitcode=$ec" >> "$GITHUB_OUTPUT"
+          [ "$ec" -eq 1 ] && exit 1 || exit 0
+
+      - name: Plan summary
+        if: steps.plan.outputs.exitcode == '2'
+        run: |
+          {
+            echo "### Squad on ACA Terraform plan (${{ inputs.action }})"
+            echo '```'
+            terraform show -no-color tfplan | grep -E '^\s*# |^Plan:'
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Terraform Apply
+        if: inputs.action != 'plan' && steps.plan.outputs.exitcode == '2'
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Remove local plan file
+        if: always()
+        run: rm -f tfplan
+
+      - name: Prove optional resources
+        if: inputs.action == 'apply'
+        run: |
+          RG=$(terraform output -raw resource_group_name)
+          SA=$(terraform output -raw storage_account_name)
+          KV=$(terraform output -raw key_vault_name)
+          JOB=$(terraform output -raw agent_job_name)
+          ENV=$(terraform output -raw container_app_environment_name)
+          QUEUE=$(terraform output -raw queue_name)
+          ACR=$(terraform output -raw acr_login_server)
+
+          SA_PUBLIC=$(az storage account show -g "$RG" -n "$SA" --query publicNetworkAccess -o tsv)
+          KV_PUBLIC=$(az keyvault show -g "$RG" -n "$KV" --query properties.publicNetworkAccess -o tsv)
+          JOB_STATE=$(az resource show -g "$RG" -n "$JOB" --resource-type Microsoft.App/jobs --query properties.provisioningState -o tsv)
+          ENV_STATE=$(az resource show -g "$RG" -n "$ENV" --resource-type Microsoft.App/managedEnvironments --query properties.provisioningState -o tsv)
+
+          {
+            echo "### Optional Squad on ACA"
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+            echo "| Resource group | $RG |"
+            echo "| Storage queue | $SA / $QUEUE |"
+            echo "| Storage public network access | $SA_PUBLIC (expect Disabled) |"
+            echo "| Key Vault public network access | $KV_PUBLIC (expect Disabled) |"
+            echo "| Container Apps environment | $ENV / $ENV_STATE |"
+            echo "| Agent job | $JOB / $JOB_STATE |"
+            echo "| Agent image registry | $ACR |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          [ "$SA_PUBLIC" = "Disabled" ] || { echo "::error::Storage public network access is not disabled"; exit 1; }
+          [ "$KV_PUBLIC" = "Disabled" ] || { echo "::error::Key Vault public network access is not disabled"; exit 1; }
+          [ "$JOB_STATE" = "Succeeded" ] || { echo "::error::Job provisioning state is $JOB_STATE"; exit 1; }
+          [ "$ENV_STATE" = "Succeeded" ] || { echo "::error::Environment provisioning state is $ENV_STATE"; exit 1; }

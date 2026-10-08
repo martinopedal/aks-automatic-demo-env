@@ -2,6 +2,8 @@
 
 ## 2026-10-08
 
+- Optional Squad on ACA side track: added a separate Terraform root, gated workflow, and runbook for Haflidi's issue-label-to-Container-Apps-Job demo, with tenant feasibility notes and manual bootstrap steps.
+
 - Demo VM: `scripts/Set-GuestLocalLogin.ps1` gives a B2B guest presenter a local account (Run Command with a protected parameter, password to the operator's clipboard only); `Connect-DemoVm.ps1 -LocalAccount` connects with it.
 
 - Online app: replaced the stock ASP.NET sample with a NIC 2026 demo page (NGINX unprivileged, pinned digest, same hardening) that explains the pipeline and shows the serving pod. Proof step takes the address from the controller Service (the Ingress status can keep the previous controller IP after a class switch) and checks the page title and pod marker.

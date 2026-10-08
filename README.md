@@ -37,6 +37,10 @@ The reusable module lives at [martinopedal/terraform-azapi-aks-automatic](https:
 | `.github/workflows/validate.yml` | Pull request and `main` validation: Terraform, Trivy, Checkov, and TFLint. |
 | `docs/operations-runbook.md` | Operator runbook for planning, applying, proving, resetting, and teardown. |
 
+## Optional
+
+- [Squad on Azure Container Apps Jobs side track](docs/squad-on-aca.md): optional Copilot CLI + Squad issue-label-to-PR demo using Haflidi's MIT-licensed design.
+
 ## Operating the environments
 
 Start with the [operations runbook](docs/operations-runbook.md). The short version is:
