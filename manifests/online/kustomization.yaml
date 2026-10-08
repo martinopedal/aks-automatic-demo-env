@@ -8,3 +8,11 @@ resources:
   - deployment.yaml
   - service.yaml
   - ingress.yaml
+# The page and NGINX config. The generated name carries a content hash, so
+# editing either file rolls the Deployment.
+configMapGenerator:
+  - name: online-demo-site
+    namespace: online-demo
+    files:
+      - site/index.html
+      - site/default.conf

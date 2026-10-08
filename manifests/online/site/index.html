@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AKS Automatic | NIC 2026 demo</title>
+<style>
+  :root { --ink:#1A1B1B; --ink2:#232525; --line:#34383A; --cyan:#98F8FE; --text:#E8ECEC; --muted:#9AA4A6; --ok:#7CF2A6; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--ink); color:var(--text); font:16px/1.55 Roboto,"Segoe UI",system-ui,sans-serif; }
+  .wrap { max-width:1080px; margin:0 auto; padding:48px 28px 40px; }
+  .tag { display:inline-block; color:var(--ink); background:var(--cyan); font-weight:700; font-size:13px; letter-spacing:.08em; text-transform:uppercase; padding:4px 10px; border-radius:4px; }
+  h1 { font-size:clamp(34px,5vw,56px); line-height:1.08; margin:18px 0 12px; letter-spacing:-.02em; }
+  h1 span { color:var(--cyan); }
+  .lead { color:var(--muted); font-size:19px; max-width:760px; }
+  .live { margin-top:28px; display:flex; flex-wrap:wrap; gap:12px; }
+  .pill { border:1px solid var(--line); background:var(--ink2); border-radius:999px; padding:8px 16px; font-size:14px; color:var(--muted); }
+  .pill b { color:var(--text); font-weight:600; font-family:Consolas,"Cascadia Mono",monospace; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--ok); margin-right:8px; box-shadow:0 0 10px var(--ok); }
+  h2 { font-size:14px; letter-spacing:.12em; text-transform:uppercase; color:var(--cyan); margin:48px 0 16px; }
+  ol.flow { list-style:none; padding:0; display:grid; grid-template-columns:repeat(6,1fr); gap:10px; counter-reset:s; }
+  ol.flow li { counter-increment:s; background:var(--ink2); border:1px solid var(--line); border-radius:10px; padding:16px 14px; font-size:14px; color:var(--muted); }
+  ol.flow li::before { content:counter(s); display:block; color:var(--cyan); font-weight:700; font-size:22px; margin-bottom:6px; }
+  ol.flow li strong { display:block; color:var(--text); font-size:15px; margin-bottom:4px; }
+  .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }
+  .card { background:var(--ink2); border:1px solid var(--line); border-radius:12px; padding:20px 22px; }
+  .card h3 { font-size:17px; margin-bottom:10px; }
+  .card ul { padding-left:18px; color:var(--muted); font-size:14.5px; }
+  .card li { margin:4px 0; }
+  .card li::marker { color:var(--cyan); }
+  .note { margin-top:28px; border-left:3px solid var(--cyan); padding:10px 16px; color:var(--muted); font-size:14px; background:var(--ink2); border-radius:0 8px 8px 0; }
+  footer { margin-top:44px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:14px; display:flex; flex-wrap:wrap; justify-content:space-between; gap:10px; }
+  a { color:var(--cyan); text-decoration:none; } a:hover { text-decoration:underline; }
+  @media (max-width:900px) { ol.flow { grid-template-columns:repeat(2,1fr); } .grid { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <span class="tag">NIC 2026 &middot; Copilot CLI + Squad for Terraform</span>
+  <h1>AKS Automatic, <span>shipped through a gated pipeline</span></h1>
+  <p class="lead">This page runs on an AKS Automatic cluster in an Azure Online landing zone. Nobody clicked it together in the portal: Terraform built it, a human approved the plan, and the pipeline proved it over HTTPS before it finished.</p>
+
+  <div class="live">
+    <span class="pill"><span class="dot"></span>Served by pod <b>__POD__</b></span>
+    <span class="pill">Rendered <b>__TIME__</b></span>
+    <span class="pill">Refresh to see both replicas answer</span>
+  </div>
+
+  <h2>How this page got here</h2>
+  <ol class="flow">
+    <li><strong>Brief</strong>Squad plans the change; one lane owns each file.</li>
+    <li><strong>Code</strong>Copilot CLI writes Terraform against a reusable AzAPI module.</li>
+    <li><strong>Check</strong>fmt, validate, offline tests, TFLint, Trivy, Checkov, CodeQL.</li>
+    <li><strong>Plan</strong>A pull request, then a plan a human reads.</li>
+    <li><strong>Approve</strong>The environment gate needs a reviewer. No apply from a laptop.</li>
+    <li><strong>Prove</strong>OIDC deploy from an ephemeral runner, then an HTTPS check by hostname.</li>
+  </ol>
+
+  <h2>What is underneath</h2>
+  <div class="grid">
+    <div class="card"><h3>Cluster</h3><ul>
+      <li>AKS Automatic SKU, managed system node pools</li>
+      <li>Entra ID + Azure RBAC only, local accounts off</li>
+      <li>Azure Policy and Key Vault secrets provider add-ons</li>
+      <li>Node resource group locked to read-only</li>
+    </ul></div>
+    <div class="card"><h3>Network</h3><ul>
+      <li>Own VNet, an NSG on every subnet</li>
+      <li>Egress through a NAT Gateway with a static IP</li>
+      <li>API server reachable only from the runner's IP</li>
+      <li>Managed NGINX ingress (App Routing), HTTP forced to HTTPS</li>
+    </ul></div>
+    <div class="card"><h3>This workload</h3><ul>
+      <li>Non-root, read-only root filesystem</li>
+      <li>All Linux capabilities dropped, seccomp on</li>
+      <li>Default-deny network policy, ingress only from NGINX</li>
+      <li>Image pinned by digest, Pod Security "restricted"</li>
+    </ul></div>
+  </div>
+
+  <p class="note">Your browser warned you about the certificate. That's deliberate: the demo uses the ingress default self-signed certificate. In production, put a CA-issued certificate in Key Vault and let the App Routing add-on serve it.</p>
+
+  <footer>
+    <span>Martin &amp; Haflidi &middot; NIC 2026, Oslo</span>
+    <span>Code: <a href="https://github.com/martinopedal/aks-automatic-demo-env">aks-automatic-demo-env</a> &middot; module <a href="https://github.com/martinopedal/terraform-azapi-aks-automatic">terraform-azapi-aks-automatic</a></span>
+  </footer>
+</main>
+</body>
+</html>

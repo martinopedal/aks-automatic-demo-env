@@ -175,12 +175,13 @@ jobs:
           LOCATION=$(az aks show --resource-group rg-aks-online-demo --name aks-online-demo --query location -o tsv)
           FQDN="$LABEL.$LOCATION.cloudapp.azure.com"
 
-          # Wait until the Ingress reports the new controller's address and
-          # the FQDN resolves to that same address (a class switch can leave
-          # the previous controller's IP in the status for a short while).
+          # The address comes from the controller's own LoadBalancer Service
+          # (the one carrying the DNS label). The Ingress status is not used:
+          # after an ingress class switch it can keep the previous
+          # controller's IP. Wait until the FQDN resolves to that address.
           ADDRESS=""; RESOLVED=""
           for i in $(seq 1 40); do
-            ADDRESS=$(kubectl get ingress online-demo -n online-demo -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+            ADDRESS=$(kubectl get svc -n app-routing-system -o jsonpath='{range .items[*]}{.metadata.annotations.service\.beta\.kubernetes\.io/azure-dns-label-name}{" "}{.status.loadBalancer.ingress[0].ip}{"\n"}{end}' | awk -v l="$LABEL" '$1==l {print $2}')
             RESOLVED=$(getent hosts "$FQDN" | awk '{print $1}' | head -n1)
             [ -n "$ADDRESS" ] && [ "$ADDRESS" = "$RESOLVED" ] && break
             echo "Waiting for ingress address and DNS ($i/40): ingress=$ADDRESS dns=$RESOLVED"; sleep 15
@@ -218,5 +219,7 @@ jobs:
 
           [ "$ADDRESS" = "$RESOLVED" ] || { echo "::error::$FQDN does not resolve to the ingress address"; exit 1; }
           [ "$HTTPS_CODE" = "200" ] || { echo "::error::HTTPS did not return 200"; exit 1; }
+          grep -q '<title>AKS Automatic | NIC 2026 demo' body.html || { echo "::error::Unexpected page content"; exit 1; }
+          grep -q 'Served by pod <b>online-demo-' body.html || { echo "::error::Page not rendered by an online-demo pod"; exit 1; }
           [ "$REDIRECT" = "true" ] || { echo "::error::Ingress does not force HTTPS"; exit 1; }
           [ -n "$TLS" ] || { echo "::error::Ingress has no TLS section"; exit 1; }
