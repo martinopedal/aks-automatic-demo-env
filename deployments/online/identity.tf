@@ -10,8 +10,12 @@
 # role (ABAC-constrained RBAC Administrator on the resource group).
 # =============================================================================
 
+# Subscription scope returns the subscription-qualified ID that ARM stores
+# on the role assignment; without it the ID is tenant-level and the plan
+# shows a perpetual in-place change.
 data "azurerm_role_definition" "network_contributor" {
-  name = "Network Contributor"
+  name  = "Network Contributor"
+  scope = "/subscriptions/${data.azapi_client_config.current.subscription_id}"
 }
 
 resource "azapi_resource" "uami_cluster" {
