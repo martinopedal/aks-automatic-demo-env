@@ -82,6 +82,10 @@ spec:
               subPath: index.html
               readOnly: true
             - name: site
+              mountPath: /usr/share/nginx/html/martin.jpg
+              subPath: martin.jpg
+              readOnly: true
+            - name: site
               mountPath: /etc/nginx/conf.d/default.conf
               subPath: default.conf
               readOnly: true
