@@ -24,7 +24,8 @@ $env:AZURE_SUBSCRIPTION_ID_ONLINE = '<set in your shell only>'
 | `scripts/Invoke-GatedRun.ps1` | Dispatches a workflow, waits until GitHub has registered the environment gate, approves it, confirms the approval took effect, waits for the result (status line about every 5 minutes), and prints the plan, apply, and proof lines plus a password-leak check. |
 | `scripts/Test-OnlineSecurity.ps1` | 29 read-back checks of the Online cluster: SKU, identity, network, platform, state, negative tests from the internet, app hostname DNS, HTTPS and redirect, policy summary. Prints the app URL. Exit 1 on any failure. |
 | `scripts/Test-DemoVm.ps1` | 14 checks of the demo VM: Bastion tunnel and RDP handshake, NAT egress IP, GitHub, WinGet, and npm reachability, WinGet, PowerShell 7, Entra join, and a clean start (no Git, Copilot CLI, Squad, or demo clone in any profile). Exit 1 on any failure. |
-| `scripts/Connect-DemoVm.ps1` | Opens a native RDP session through Bastion with Entra sign-in and MFA. |
+| `scripts/Connect-DemoVm.ps1` | Opens a native RDP session through Bastion with Entra sign-in and MFA, or with a local account (`-LocalAccount`, for guests). |
+| `scripts/Set-GuestLocalLogin.ps1` | Creates or resets a guest presenter's local VM account; the generated password goes only to the operator's clipboard. |
 
 `Invoke-GatedRun.ps1` approves on your behalf. Run it only for a change you have already reviewed.
 
@@ -62,7 +63,7 @@ The pipeline identity cannot grant itself rights, so these were created once by 
 ## Demo VM
 
 - **Connect:** `./scripts/Connect-DemoVm.ps1`. Members sign in with Entra ID (`DEMO_VM_ENTRA_ADMINS` environment variable grants Virtual Machine Administrator Login).
-- **Guest presenters:** B2B guests cannot use Entra sign-in to VMs. They get Reader on the Bastion (`DEMO_VM_BASTION_USERS`) and a local account. The local admin password is generated per run and never stored, so Martin resets it out of band (`az vm user update`) and shares it privately. Never put it in a file, issue, or chat log.
+- **Guest presenters:** B2B guests cannot use Entra sign-in to VMs. They get Reader on the resource group (`DEMO_VM_BASTION_USERS`) and their own local account: `./scripts/Set-GuestLocalLogin.ps1 -UserName <name>` creates or resets it through a managed Run Command (protected parameter, deleted afterwards) and puts the generated password on the operator's clipboard. Hand it over privately. The guest connects with `./scripts/Connect-DemoVm.ps1 -LocalAccount` after `az login` to the tenant, so the password alone does not reach the VM. Re-run after `action=recreate-vm`.
 - **Reset to clean:** `action=recreate-vm` replaces the VM, OS disk, and VM-scoped extensions, then proves the clean state. Allow 15-20 minutes: landing-zone DeployIfNotExists policies add the Azure Monitor agent, ChangeTracking, GuestAttestation, and Azure Policy extensions after creation, which keeps the VM in `Updating` for several minutes. The workflow retries and waits for a terminal state.
 - **Auto-shutdown:** 19:00 W. Europe. Start it with `az vm start` before an evening rehearsal.
 - **Clean-machine demo script:** see the session repository documentation at `docs/clean-machine-demo.md` in `martinopedal/squad-terraform-session-2026-10-14`.

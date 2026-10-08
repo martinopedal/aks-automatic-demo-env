@@ -16,7 +16,10 @@ param(
     [string]$Subscription = $env:AZURE_SUBSCRIPTION_ID_ONLINE,
     [string]$ResourceGroup = 'rg-demo-vm-online',
     [string]$VmName = 'vm-demo-copilot',
-    [string]$BastionName = 'bas-demo-copilot'
+    [string]$BastionName = 'bas-demo-copilot',
+    # Guests (B2B) sign in with a local account from Set-GuestLocalLogin.ps1
+    # instead of Entra ID; Bastion still requires their own az login.
+    [switch]$LocalAccount
 )
 $ErrorActionPreference = 'Stop'
 if (-not $Subscription) { throw 'Set -Subscription or $env:AZURE_SUBSCRIPTION_ID_ONLINE.' }
@@ -32,6 +35,12 @@ if ($power -ne 'PowerState/running') {
 }
 
 $vmId = az vm show -g $ResourceGroup -n $VmName --subscription $Subscription --query id -o tsv
+if ($LocalAccount) {
+    Write-Host 'Opening native RDP through Bastion; sign in as .\<local user> when Windows asks...'
+    az network bastion rdp --name $BastionName --resource-group $ResourceGroup --subscription $Subscription `
+        --target-resource-id $vmId
+    return
+}
 Write-Host 'Opening native RDP through Bastion with Microsoft Entra ID...'
 az network bastion rdp --name $BastionName --resource-group $ResourceGroup --subscription $Subscription `
     --target-resource-id $vmId --enable-mfa
