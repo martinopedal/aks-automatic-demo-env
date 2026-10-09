@@ -29,6 +29,10 @@
   .card li { margin:4px 0; }
   .card li::marker { color:var(--cyan); }
   .note { margin-top:28px; border-left:3px solid var(--cyan); padding:10px 16px; color:var(--muted); font-size:14px; background:var(--ink2); border-radius:0 8px 8px 0; }
+  ol.build { list-style:none; padding:0; display:grid; grid-template-columns:repeat(5,1fr); gap:12px; counter-reset:b; }
+  ol.build li { counter-increment:b; background:var(--ink2); border:1px solid var(--line); border-radius:12px; padding:16px 14px; color:var(--muted); font-size:14px; }
+  ol.build li::before { content:counter(b); display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; margin-bottom:10px; border-radius:50%; background:var(--ink); border:1px solid var(--cyan); color:var(--cyan); font-weight:700; }
+  ol.build li strong { display:block; color:var(--text); font-size:15px; margin-bottom:4px; }
   .speakers { display:grid; grid-template-columns:repeat(2,1fr); gap:14px; }
   .speaker { display:flex; gap:18px; align-items:center; background:var(--ink2); border:1px solid var(--line); border-radius:12px; padding:18px 20px; }
   .speaker img, .speaker .initials { width:84px; height:84px; border-radius:50%; flex:none; border:2px solid var(--cyan); object-fit:cover; }
@@ -40,7 +44,7 @@
   .links a:hover { border-color:var(--cyan); text-decoration:none; }
   footer { margin-top:44px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:14px; display:flex; flex-wrap:wrap; justify-content:space-between; gap:10px; }
   a { color:var(--cyan); text-decoration:none; } a:hover { text-decoration:underline; }
-  @media (max-width:900px) { ol.flow { grid-template-columns:repeat(2,1fr); } .grid, .speakers { grid-template-columns:1fr; } }
+  @media (max-width:900px) { ol.flow { grid-template-columns:repeat(2,1fr); } ol.build { grid-template-columns:1fr; } .grid, .speakers { grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
@@ -89,6 +93,15 @@
 
   <p class="note">Your browser warned you about the certificate. This demo uses the ingress default self-signed certificate on purpose. In production we would put a certificate from a public CA in Key Vault and let the App Routing add-on serve it.</p>
 
+  <h2>How we built this</h2>
+  <ol class="build">
+    <li><strong>Squad</strong>Squad coordinated lead, reviewer, security, and fact-checker agents in parallel.</li>
+    <li><strong>Copilot CLI</strong>Copilot CLI agents terraform-coder, terraform-reviewer, and terraform-validator wrote and checked the Terraform module.</li>
+    <li><strong>Terraform MCP</strong>Terraform MCP supplied current provider facts so the code used real arguments.</li>
+    <li><strong>GitHub gates</strong>GitHub enforced the pull request, protected main, required review, CodeQL, secret scanning, Dependabot, OIDC, and approval before apply.</li>
+    <li><strong>Proof</strong>The pipeline applied the change and Test-OnlineSecurity confirmed the environment at 29/29.</li>
+  </ol>
+
   <h2>Your speakers</h2>
   <div class="speakers">
     <div class="speaker">
@@ -118,6 +131,7 @@
   <footer>
     <span>NIC 2026, Oslo &middot; <a href="https://www.opedal.tech">opedal.tech</a></span>
     <span>Code: <a href="https://github.com/martinopedal/aks-automatic-demo-env">aks-automatic-demo-env</a> &middot; module <a href="https://github.com/martinopedal/terraform-azapi-aks-automatic">terraform-azapi-aks-automatic</a></span>
+    <span>Session repo: <a href="https://github.com/martinopedal/squad-terraform-session-2026-10-14">martinopedal/squad-terraform-session-2026-10-14</a></span>
   </footer>
 </main>
 </body>

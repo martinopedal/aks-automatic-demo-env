@@ -2,6 +2,8 @@
 
 ## 2026-10-08
 
+- Online app: added a concise "How we built this" section to the live page with the documented Squad, Copilot CLI, Terraform MCP, GitHub gate, pipeline, and `Test-OnlineSecurity` facts, plus a footer link to the session repository.
+
 - Online app: replaced the "HF" initials badge in the "Your speakers" section with Haflidi Fridthjofsson's photo, wired through the site ConfigMap and mounted into the pod like Martin's photo.
 
 - Demo VM: `scripts/Set-GuestLocalLogin.ps1` gives a B2B guest presenter a local account (Run Command with a protected parameter, password to the operator's clipboard only); `Connect-DemoVm.ps1 -LocalAccount` connects with it.
