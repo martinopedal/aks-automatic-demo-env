@@ -2,6 +2,8 @@
 
 ## 2026-10-08
 
+- Online app: updated Martin Opedal's speaker title on the live page to "Enterprise Cloud Solution Architect, Microsoft".
+
 - Online app: added a concise "How we built this" section to the live page with the documented Squad, Copilot CLI, Terraform MCP, GitHub gate, pipeline, and `Test-OnlineSecurity` facts, plus a footer link to the session repository.
 
 - Online app: replaced the "HF" initials badge in the "Your speakers" section with Haflidi Fridthjofsson's photo, wired through the site ConfigMap and mounted into the pod like Martin's photo.
