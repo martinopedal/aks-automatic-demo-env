@@ -161,7 +161,13 @@ jobs:
         if: inputs.apply
         working-directory: manifests/online
         run: |
-          kubectl apply -k .
+          # The AKS Entra webhook (guard) has a 3s limit and occasionally times out; apply is idempotent.
+          for attempt in 1 2 3; do
+            kubectl apply -k . && break
+            [ "$attempt" = "3" ] && { echo "::error::kubectl apply failed after 3 attempts"; exit 1; }
+            echo "kubectl apply failed (attempt $attempt), retrying in 20s"
+            sleep 20
+          done
           kubectl rollout status deployment/online-demo -n online-demo --timeout=600s
           kubectl get deployment,pod,service,ingress,networkpolicy -n online-demo -o wide
           echo "Least privilege check (expect 'no'):"
