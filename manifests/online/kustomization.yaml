@@ -17,3 +17,4 @@ configMapGenerator:
       - site/index.html
       - site/default.conf
       - site/martin.jpg
+      - site/haflidi.jpg

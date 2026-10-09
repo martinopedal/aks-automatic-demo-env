@@ -2,6 +2,8 @@
 
 ## 2026-10-08
 
+- Online app: replaced the "HF" initials badge in the "Your speakers" section with Haflidi Fridthjofsson's photo, wired through the site ConfigMap and mounted into the pod like Martin's photo.
+
 - Demo VM: `scripts/Set-GuestLocalLogin.ps1` gives a B2B guest presenter a local account (Run Command with a protected parameter, password to the operator's clipboard only); `Connect-DemoVm.ps1 -LocalAccount` connects with it.
 
 - Online app: replaced the stock ASP.NET sample with a NIC 2026 demo page (NGINX unprivileged, pinned digest, same hardening) that explains the pipeline and shows the serving pod. Proof step takes the address from the controller Service (the Ingress status can keep the previous controller IP after a class switch) and checks the page title and pod marker.
