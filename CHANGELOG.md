@@ -2,6 +2,8 @@
 
 ## 2026-10-08
 
+- Online app: added Haflidi Fridthjofsson's `azureviking.com` and LinkedIn chips to the speaker card on the live page, matching Martin's link style and order.
+
 - Online app: updated Martin Opedal's speaker title on the live page to "Enterprise Cloud Solution Architect, Microsoft".
 
 - Online app: added a concise "How we built this" section to the live page with the documented Squad, Copilot CLI, Terraform MCP, GitHub gate, pipeline, and `Test-OnlineSecurity` facts, plus a footer link to the session repository.
