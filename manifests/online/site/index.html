@@ -47,7 +47,7 @@
 <main class="wrap">
   <span class="tag">NIC 2026 &middot; Copilot CLI + Squad for Terraform</span>
   <h1>AKS Automatic, <span>shipped through a gated pipeline</span></h1>
-  <p class="lead">This page runs on an AKS Automatic cluster in an Azure Online landing zone. Nobody clicked it together in the portal: Terraform built it, a human approved the plan, and the pipeline proved it over HTTPS before it finished.</p>
+  <p class="lead">This page runs on an AKS Automatic cluster in an Azure Online landing zone. Terraform built the environment, a reviewer approved the plan, and the pipeline checked the site over HTTPS before the run finished.</p>
 
   <div class="live">
     <span class="pill"><span class="dot"></span>Served by pod <b>__POD__</b></span>
@@ -87,7 +87,7 @@
     </ul></div>
   </div>
 
-  <p class="note">Your browser warned you about the certificate. That's deliberate: the demo uses the ingress default self-signed certificate. In production, put a CA-issued certificate in Key Vault and let the App Routing add-on serve it.</p>
+  <p class="note">Your browser warned you about the certificate. This demo uses the ingress default self-signed certificate on purpose. In production we would put a certificate from a public CA in Key Vault and let the App Routing add-on serve it.</p>
 
   <h2>Your speakers</h2>
   <div class="speakers">
