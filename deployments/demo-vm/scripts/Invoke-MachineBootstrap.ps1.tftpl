@@ -17,7 +17,7 @@ try {
     if ((Get-FileHash $manifest -Algorithm SHA256).Hash -ne '${manifest_sha256}') { throw 'Bootstrap manifest SHA256 mismatch' }
     $previousRun = if (Test-Path $receipt) { (Get-Content $receipt -Raw | ConvertFrom-Json).RunId } else { $null }
     & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -File $script -AllUsers
-    if ($LASTEXITCODE -ne 0) { throw "Machine bootstrap exited $LASTEXITCODE; reboot-required is not success" }
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $r = Get-Content $receipt -Raw | ConvertFrom-Json
     if ($r.SchemaVersion -ne 1 -or $r.Mode -ne 'AllUsers' -or $r.Core -ne 'pass' -or $r.Architecture -ne 'x64') { throw 'Missing machine core receipt' }
     if ($r.RunId -notmatch '^[a-fA-F0-9]{32}$' -or $r.RunId -eq $previousRun -or [DateTime]::Parse($r.VerifiedAtUtc).ToUniversalTime() -lt $started) { throw 'Stale machine receipt' }

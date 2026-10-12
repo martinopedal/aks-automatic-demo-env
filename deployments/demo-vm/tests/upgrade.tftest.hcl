@@ -49,11 +49,11 @@ variables {
     os_disk_id = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Compute/disks/restored-offline-disk"
     bootstrap = {
       repository      = "example/offline-payload"
-      commit          = "1111111111111111111111111111111111111111"
+      commit          = "f04ec69afe46971118493b8a1434a1e2b398f814"
       script_path     = "public/scripts/bootstrap-demo-vm.ps1"
       manifest_path   = "public/scripts/bootstrap-demo-vm.packages.json"
-      script_sha256   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-      manifest_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      script_sha256   = "3cc9fe4eb576c3795d0550e235c97d94227a992b32bd078ce6b2920fdc2c2ca8"
+      manifest_sha256 = "9ea0fd7ab57759ee029b5604e17fd579c3e84f4f5c63e664c81837fb501cc7c0"
       system_accepted = true
     }
   }
@@ -61,6 +61,13 @@ variables {
 
 run "retains_existing_disk_and_addresses" {
   command = plan
+  override_resource {
+    target          = azapi_resource.nic
+    override_during = plan
+    values = {
+      id = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Network/networkInterfaces/nic-demo-copilot"
+    }
+  }
   assert {
     condition     = azapi_resource.vm.body.properties.hardwareProfile.vmSize == "Standard_D8s_v5"
     error_message = "Existing azapi_resource.vm must receive exactly D8s_v5."
@@ -98,8 +105,9 @@ run "retains_existing_disk_and_addresses" {
       azapi_resource.machine_bootstrap[0].body.properties.publisher == "Microsoft.Compute" &&
       azapi_resource.machine_bootstrap[0].body.properties.type == "CustomScriptExtension" &&
       startswith(azapi_resource.machine_bootstrap[0].body.properties.settings.commandToExecute, "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ")
+      && length(azapi_resource.machine_bootstrap[0].body.properties.settings.commandToExecute) <= 7500
     )
-    error_message = "One real machine CSE command must be emitted, not a status-only bootstrap promise."
+    error_message = "One real machine CSE command must fit the Windows cmd launch bound with margin, not a status-only bootstrap promise."
   }
 }
 

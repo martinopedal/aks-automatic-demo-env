@@ -51,10 +51,14 @@ They are offline source checks, **not a live Azure plan**. On a qualifying merge
    prevent self-review, no admin bypass, only branch `main` (no tags).
 2. Existing `online` approval and OIDC trust authorize a fresh incremental plan.
 3. Validate source, private scope, fresh all-tenant cost/owner/downtime/licensing/
-   quota/SYSTEM evidence. Fail closed on any missing qualification.
+   quota/SYSTEM evidence. Cost qualification requires the complete private
+   tenant-root inventory and every actual-cost query, not coverage checkboxes.
+   Fail closed on any missing qualification.
 4. Inspect the emitted plan: existing VM update only, same disk SKU-only
    update, one exact CSE, both ordered same-VM actions, no other managed changes,
-   no deletion/replacement/unknown critical VM body.
+   no deletion/replacement/unknown critical VM body. Terraform's nested
+   `after_unknown.body` maps/lists are inspected recursively: known/empty maps
+   are valid, genuine `true` leaves and invalid marker types are rejected.
 5. Store the exact saved-plan bundle **only in the existing private Terraform
    backend container**, at `demo-vm-plans/<run>/<attempt>/<source>/delivery.tar`,
    via the existing OIDC data-plane identity. No storage keys, new identity,
@@ -63,8 +67,10 @@ They are offline source checks, **not a live Azure plan**. On a qualifying merge
    summary, source/run and SHA256 hashes appear in public workflow output.
 6. **Haflidi approves that specific saved-plan run**, not an unseen future plan.
    A subsequent unchanged `online` gate still requires its existing owner.
-7. Retrieve and verify the same bytes/source/run/attempt/lock/binding/evidence,
-   a 24-hour expiry and read-only live baseline hashes; apply only `tfplan`.
+7. Retrieve and verify the same bytes/source/run/attempt/lock/binding/evidence
+   **and cost receipt**, a maximum 24-hour expiry bounded by the authorized
+   October 15 deadline/return time, and read-only live baseline hashes; apply
+   only `tfplan`.
    Terraform's stale-state check is an additional control, not a substitute
    for live drift detection. No new plan is substituted after approval.
 
@@ -115,8 +121,16 @@ keys, compact separators and UTF-8). Required fields:
   "expires_utc": "<UTC expiry, maximum 24h from observation>",
   "currency": "USD",
   "tenant_limit_usd": 2500,
-  "projected_eom_usd": "<fresh numeric total-tenant conservative estimate>",
-  "incremental_reserve_usd": "<numeric reserve, at least 29.49 for 72h>",
+  "cost_receipt_sha256": "<canonical hash of the complete private receipt>",
+  "inventory_sha256": "<canonical hash of independently qualified raw inventory>",
+  "query_manifest_sha256": "<canonical per-subscription query manifest hash>",
+  "actual_mtd_usd": "<numeric recomputed MTD total, rounded UP to cents>",
+  "projected_horizon_usd": "<numeric total INCLUDING full VM and lag reserves>",
+  "vm_reserve_usd": "<numeric full 72h VM reserve, at least 60>",
+  "billing_lag_reserve_usd": "<numeric reserve for at least two observed high days>",
+  "budget_horizon_utc": "2026-10-15T21:59:59Z",
+  "planned_start_utc": "<private planned upgrade start, not before observation>",
+  "planned_return_utc": "<earlier of planned start+72h and authorized deadline>",
   "all_subscription_coverage": false,
   "budget_accepted": false,
   "downtime_accepted": false,
@@ -131,12 +145,87 @@ keys, compact separators and UTF-8). Required fields:
 This intentionally **blocked schema illustration is not runnable approval**.
 Owner declarations are protected inputs, not manufactured human approval:
 the real Haflidi environment gate still releases the exact saved plan.
-Use evidence for every true value. Baseline observations from October 12:
+Use evidence for every true value. The user authorized the temporary budget
+horizon **through October 15, 2026, EOD UTC+02 (21:59:59Z)**, not October 31.
+The cap stays **USD2,500 TOTAL tenant**, not USD2,500 incremental VM spend.
+An old packet cannot apply after that deadline or its earlier expiry/return.
+Planned return is privately qualified by Haflidi; the source does not
+automatically downgrade, shut down shared workloads or delete the VM.
+
+`DEMO_VM_UPGRADE_COST_RECEIPT_JSON` is a **private protected owner input**,
+written locally with restrictive permissions and sealed into the same private
+backend bundle. No collection permissions, new cost identity, public artifact,
+new plaintext secret store or fabricated cost source is introduced. Leave it
+unset until the existing authorized operator supplies actual evidence.
+Receipt schema version 1 requires:
+
+- `source_sha`, `binding_sha256`, `observed_utc`, `currency = "USD"`.
+  The qualification's `cost_receipt_sha256` uses the same canonical JSON hash
+  algorithm as the binding (sorted keys, compact separators, UTF-8, no NaN).
+- `qualification_inputs`: exactly `tenant_limit_usd`, `vm_reserve_usd`,
+  `billing_lag_reserve_usd`, `duration_hours`, `budget_horizon_utc`,
+  `planned_start_utc`, `planned_return_utc`, all equal to the qualification.
+- `inventory`: `observed_utc`, exact tenant-root management-group `scope`,
+  complete original ARM `response` (tenant ID/name/id, null root parent,
+  recursively expanded management-group/subscription children). No paginated,
+  duplicate or partial inventory. The VM's subscription must belong to it.
+  Its canonical response hash must equal the qualification's separately
+  accepted `inventory_sha256`; pruning inventory and matching queries cannot
+  pass by merely refreshing the whole-packet digest.
+- `queries`: exactly one entry per inventory subscription, with
+  `subscription_id`, exact subscription `scope`, `observed_utc`,
+  integer `http_status = 200`, original `request` and original `response`.
+  The request must be **unfiltered ActualCost/MonthToDate, Daily,
+  PreTaxCost/Sum**. Response scope and columns must match
+  `PreTaxCost:Number`, `UsageDate:Number`, `Currency:String`; `nextLink` must
+  explicitly be null. Every completed month-to-date day must have a USD
+  numeric row for every subscription (explicit zero rows are permitted).
+  Missing daily coverage/empty responses require fresh complete evidence,
+  not treating a missing row as zero. Current-day rows are optional.
+  `query_manifest_sha256` hashes the canonical map
+  `{subscription_id: canonical_hash(complete_query_entry)}` and must equal
+  the qualification's separately accepted complete-collection manifest.
+  Refresh these accepted digests only from actual complete operator receipts,
+  not by blessing a mutated/partial packet.
+- `actual_mtd_usd`: recomputed sum of all rows, rounded **up** to cents.
+  A completely zero tenant, negative/boolean/nonfinite amounts, mixed currency,
+  stale/scope-mismatched/failed/filtered/paginated responses are blocked.
+- `projection`: `kind =
+  "operator_highest_seven_completed_days_plus_mtd_through_authorized_horizon"`,
+  exact chronological `completed_days` (seven previous UTC dates as
+  `YYYYMMDD`), integer `remaining_days`, numeric `daily_bound_usd`,
+  integer `billing_lag_additional_days` (at least two), nonempty declared
+  `billing_lag_basis`, numeric `projected_horizon_usd`.
+  The guard recomputes the **highest** last-seven-completed-day tenant total
+  from the raw rows and verifies the claimed daily bound and lag reserve
+  (allowing only 1e-8 USD numeric-serialization tolerance for those two derived
+  values). It adds **a full current-partial-day reserve and each day through
+  October 15**, MTD, full VM reserve and positive lag reserve, rounded up
+  to cents. It rejects a claimed projection that differs from that calculation.
+  Thus October 12 evidence requires four days, not three. Evidence collected
+  too early in the month to establish seven completed days is blocked.
+
+Inventory/query observations must be the same UTC date as the receipt,
+not in its future, and within 24 hours; the receipt timestamp must exactly
+match the qualification's fresh observation. The full raw evidence, source,
+scope and numerical inputs are bound by the receipt digest, qualification
+and saved-plan seal. A digest demonstrates binding, **not independent truth
+or permission to invent raw responses**; the owner still supplies actual
+authorized collection. No Azure data is queried by offline tests.
+
+Baseline observations from October 12:
 USD1,335.13 MTD across all ten subscriptions, operator run-rate estimate
 ~USD4,005 EOM, versus the user's **USD2,500 total-tenant monthly cap**.
-That estimate is neither native forecast nor guaranteed bill/headroom.
-Machine checks require estimate plus reserve within the unchanged cap;
-neither merge nor approval overrides a failing budget check.
+The EOM estimate remains a **separate baseline-month risk warning** and is
+not alone a veto of the newly authorized temporary horizon. The privately
+rehashed complete receipt uses the observed high day ~USD138.566,
+**four full-day reserves plus two additional high days for lag plus USD60
+full D8 Windows/P10 reserve**: estimated total ~USD2,226.53, leaving
+~USD273.47 planning headroom under the unchanged cap through October 15.
+This is an operator estimate, not native forecast, guaranteed bill/headroom
+or a bound on future unplanned usage. Fresh actual receipts and exact-source
+qualification are still required; neither merge nor approval overrides a
+failing horizon budget check, and spending after October 15 is not approved.
 
 Conservative Windows-included retail estimates: D8 USD0.776/h, P10 disk
 USD21.68/month; 72h full ~USD58.01, incremental over D4/HDD ~USD29.49
@@ -149,14 +238,25 @@ separately reviewed return plan and budget evidence must reserve actual runtime.
 ## Bootstrap boundary
 
 The consumer is a minimal verification wrapper, not a second installer.
+Terraform GZip-compresses that trusted wrapper as UTF-8 and embeds it in a
+short UTF-16LE `EncodedCommand` launcher. Windows PowerShell 5.1 decompresses
+**in memory**, without credentials/payload in a launcher file. The plan guard
+compares both the exact trusted launcher and decompressed wrapper to source
+and the immutable binding. Terraform and Python enforce **7,500 characters
+maximum for the actual emitted command**, leaving margin under Windows
+`cmd.exe`'s 8,191-character launch limit (including the command-processor prefix).
 It stages the exact published script/manifest bytes, checks both SHA256 values,
 requires x64 LocalSYSTEM, invokes Windows PowerShell with `-AllUsers`, propagates
-nonzero/reboot-required failure and checks a **fresh** core receipt with exact
+the original native nonzero/reboot-required exit code and checks a **fresh** core receipt with exact
 hashes, 11 pinned versions and Program Files paths.
 No authentication/repository initialization/roster. Machine PATH/tools are for
 both presenters; Desktop app, VS Code user extensions, auth and presenter
 readiness remain explicitly deferred. No default Docker, WSL, reboot or
 execution-policy bypass. Offline tests are not SYSTEM/CSE runtime qualification.
+The producer has independent **source** approval; immutable publication,
+committed-raw-byte digests and live SYSTEM/CSE acceptance remain pending.
+Do not pin the working-copy manifest hash: Git LF normalization changes its
+bytes. Recompute both hashes from the actual published commit before binding.
 
 ## Repeatable root validation
 
@@ -183,6 +283,15 @@ both providers mocked, no modules/external programs/provisioners/live effects.
 Tests assert emitted VM/disk/CSE/action contracts plus default compatibility and
 intended negative failures. Python mutations cover replacement, wrong targets,
 capacity, unexpected scope, wrapper mutation and budget/provenance/protection.
+The 33 Python tests include an actual Terraform 1.16.5 JSON mock-plan export
+(known nested VM body plus computed AzAPI output unknown), nested true/invalid
+marker mutations, actual rendered command length, and complete synthetic
+positive/negative tenant receipts with production qualify/seal/verify callers.
+Windows additionally executes the actual compressed-launcher shape with only
+harmless local fixtures under `cmd.exe`/64-bit PowerShell 5.1 and verifies native
+exit codes 0, 37 and 3010. This does not install anything, use networking,
+run the SYSTEM consumer, or prove the real VM. CI runs Linux source tests and
+a credential-free Windows regression job; no provider versions are changed.
 Outputs remain VM ID, Bastion name, native-RDP command and egress address.
 Static checks cannot certify Azure acceptance, quota, identities, preservation
 of every guest file, both presenters or a rehearsal. Independent source/plan

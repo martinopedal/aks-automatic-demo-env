@@ -79,6 +79,30 @@ jobs:
           echo '### Offline source only — no live plan or execution approval' >> "$GITHUB_STEP_SUMMARY"
           echo 'Total-tenant headroom, exact disk/downtime, SYSTEM payload and protected approval must qualify post-merge.' >> "$GITHUB_STEP_SUMMARY"
 
+  offline-windows:
+    name: Windows cmd and PowerShell 5.1 contracts
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      ARM_USE_OIDC: false
+      ARM_CLIENT_ID: ""
+      ARM_TENANT_ID: ""
+      ARM_SUBSCRIPTION_ID: ""
+      TF_VAR_entra_admin_object_ids: "[]"
+      TF_VAR_bastion_user_object_ids: "[]"
+    defaults:
+      run:
+        working-directory: deployments/demo-vm
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: "1.16.5"
+          terraform_wrapper: false
+      - run: terraform init -backend=false -input=false -lockfile=readonly
+      - run: python -m unittest discover -s tests -p 'test_revision.py'
+
   upgrade-policy:
     name: Verify actual Haflidi gate
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -116,12 +140,14 @@ jobs:
         env:
           BINDING: ${{ vars.DEMO_VM_UPGRADE_BINDING_JSON }}
           QUALIFICATION: ${{ vars.DEMO_VM_UPGRADE_QUALIFICATION_JSON }}
+          COST_RECEIPT: ${{ vars.DEMO_VM_UPGRADE_COST_RECEIPT_JSON }}
           PRIVATE_TRANSPORT_ACCEPTED: ${{ vars.DEMO_VM_PRIVATE_PLAN_TRANSPORT_ACCEPTED }}
         run: |
           umask 077
           [ "$PRIVATE_TRANSPORT_ACCEPTED" = true ] || { echo "::error::Existing private backend plan-prefix transport not qualified; no new IAM or keys"; exit 1; }
           printf '%s' "$BINDING" > upgrade.auto.tfvars.json
           printf '%s' "$QUALIFICATION" > qualification.json
+          printf '%s' "$COST_RECEIPT" > cost-receipt.json
           python3 scripts/delivery_guard.py qualify
       - run: terraform fmt -check -recursive
       - run: terraform init -backend=false -input=false -lockfile=readonly && terraform validate
@@ -161,7 +187,7 @@ jobs:
             --account-name "${{ vars.TFSTATE_STORAGE_ACCOUNT_ONLINE }}" \
             --name "${{ vars.TFSTATE_CONTAINER_NAME_ONLINE }}" --query properties.publicAccess -o tsv)
           [ -z "$ACCESS" ] || { echo "::error::Plan container allows anonymous access; transport blocked"; exit 1; }
-          tar -cf delivery.tar tfplan baseline.json upgrade.auto.tfvars.json qualification.json seal.json
+          tar -cf delivery.tar tfplan baseline.json upgrade.auto.tfvars.json qualification.json cost-receipt.json seal.json
           az storage blob upload --auth-mode login --only-show-errors --output none \
             --account-name "${{ vars.TFSTATE_STORAGE_ACCOUNT_ONLINE }}" \
             --container-name "${{ vars.TFSTATE_CONTAINER_NAME_ONLINE }}" \
@@ -175,11 +201,11 @@ jobs:
             echo "Saved plan SHA256: $(sha256sum tfplan | cut -d' ' -f1)"
             echo 'Three objects only: existing D4s_v5 to D8s_v5; SAME attached 127-GiB disk Standard_LRS to Premium_LRS, Detach; one pinned packages-only CSE.'
             echo 'Operational IaC actions: deallocate, update, disk conversion, start, CSE; RAM/processes do not persist. No recreation/network/IAM changes.'
-            echo 'Historical tenant baseline ~USD4005 EOM estimate vs USD2500 cap: NOT headroom. Fresh accepted total-tenant qualification required.'
+            echo 'Temporary authorization ends October 15 21:59:59Z, total-tenant cap USD2500. Bound inventory/actual queries, full VM and lag reserves must qualify that horizon; historical ~USD4005 EOM remains a separate risk warning.'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Remove private local delivery material
         if: always()
-        run: rm -f tfplan tfplan.json plan.log delivery.tar baseline.json upgrade.auto.tfvars.json qualification.json seal.json
+        run: rm -f tfplan tfplan.json plan.log delivery.tar baseline.json upgrade.auto.tfvars.json qualification.json cost-receipt.json seal.json
 
   upgrade-approval:
     name: Haflidi approves exact saved plan
@@ -235,7 +261,7 @@ jobs:
             --name "demo-vm-plans/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/$GITHUB_SHA/delivery.tar" \
             --file delivery.tar
           [ "$(sha256sum delivery.tar | cut -d' ' -f1)" = "$BUNDLE_SHA" ] || exit 1
-          tar -xf delivery.tar tfplan baseline.json upgrade.auto.tfvars.json qualification.json seal.json
+          tar -xf delivery.tar tfplan baseline.json upgrade.auto.tfvars.json qualification.json cost-receipt.json seal.json
           [ "$(sha256sum tfplan | cut -d' ' -f1)" = "$PLAN_SHA" ] || exit 1
       - name: Existing backend; no replacement or fresh apply plan
         run: |
@@ -260,7 +286,7 @@ jobs:
       - name: Remove private delivery material
         if: always()
         run: |
-          rm -f tfplan tfplan.json apply.log delivery.tar baseline.json upgrade.auto.tfvars.json qualification.json seal.json
+          rm -f tfplan tfplan.json apply.log delivery.tar baseline.json upgrade.auto.tfvars.json qualification.json cost-receipt.json seal.json
           az storage blob delete --auth-mode login --only-show-errors --output none \
             --account-name "${{ vars.TFSTATE_STORAGE_ACCOUNT_ONLINE }}" \
             --container-name "${{ vars.TFSTATE_CONTAINER_NAME_ONLINE }}" \

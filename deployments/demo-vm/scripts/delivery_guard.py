@@ -1,7 +1,10 @@
 """Fail-closed checks for this one VM lane. Never print plan bodies or IDs."""
 import argparse
+import base64
 import copy
+from decimal import Decimal, ROUND_CEILING
 import hashlib
+import io
 import json
 import math
 import os
@@ -10,6 +13,7 @@ import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+import gzip
 
 VM = "azapi_resource.vm"
 DISK = "azapi_update_resource.upgrade_disk[0]"
@@ -17,6 +21,10 @@ CSE = "azapi_resource.machine_bootstrap[0]"
 STOP = "azapi_resource_action.upgrade_deallocate[0]"
 START = "azapi_resource_action.upgrade_start[0]"
 ALLOWED = {VM, DISK, CSE, STOP, START}
+SEALED_FILES = {"tfplan", "baseline.json", "upgrade.auto.tfvars.json",
+                "qualification.json", "cost-receipt.json", ".terraform.lock.hcl"}
+COMMAND_PREFIX = "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand "
+AUTHORIZED_HORIZON = datetime(2026, 10, 15, 21, 59, 59, tzinfo=timezone.utc)
 
 
 def require(condition, message):
@@ -28,13 +36,170 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def canonical_hash(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                    allow_nan=False).encode()).hexdigest()
+
+
+def query_manifest_hash(queries):
+    return canonical_hash({query["subscription_id"]: canonical_hash(query) for query in queries})
+
+
+def amount(value):
+    require(isinstance(value, (int, float)) and not isinstance(value, bool) and
+            math.isfinite(value) and value >= 0, "Finite non-negative cost values required")
+    return Decimal(str(value))
+
+
+def unknown_leaves(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, dict):
+        children = value.values()
+    elif isinstance(value, list):
+        children = value
+    else:
+        raise ValueError("Invalid Terraform unknown marker shape")
+    # Validate every leaf, even after finding True.
+    return any([unknown_leaves(child) for child in children])
+
+
 def utc(value):
+    require(isinstance(value, str), "UTC-qualified timestamp required")
     result = datetime.fromisoformat(value.replace("Z", "+00:00"))
     require(result.tzinfo is not None, "UTC-qualified timestamp required")
     return result.astimezone(timezone.utc)
 
 
-def qualify(binding, evidence, sha, now=None):
+def check_cost_receipt(receipt, evidence, binding, sha, binding_sha, now):
+    require(isinstance(receipt, dict), "Complete actual-cost receipt required")
+    require(receipt.get("schema_version") == 1 and type(receipt["schema_version"]) is int,
+            "Unsupported cost receipt schema")
+    require(receipt["source_sha"] == sha and receipt["binding_sha256"] == binding_sha,
+            "Cost receipt source/binding mismatch")
+    require(evidence.get("cost_receipt_sha256") == canonical_hash(receipt),
+            "Canonical cost receipt digest mismatch")
+    observed = utc(receipt["observed_utc"])
+    require(receipt["observed_utc"] == evidence["observed_utc"] and
+            now - timedelta(hours=24) <= observed <= now, "Cost receipt stale/unbound")
+    require(receipt["currency"] == evidence["currency"] == "USD", "Cost receipt currency mismatch")
+    inputs = receipt["qualification_inputs"]
+    require(set(inputs) == {"tenant_limit_usd", "vm_reserve_usd", "billing_lag_reserve_usd",
+                           "duration_hours", "budget_horizon_utc", "planned_start_utc", "planned_return_utc"} and
+            all(inputs[key] == evidence[key] for key in inputs), "Cost receipt qualification inputs mismatch")
+    amount(inputs["tenant_limit_usd"])
+    amount(inputs["vm_reserve_usd"])
+    require(amount(inputs["billing_lag_reserve_usd"]) > 0, "Positive declared billing-lag reserve required")
+    require(type(inputs["duration_hours"]) is int, "Integer qualification duration required")
+
+    def fresh(value):
+        stamp = utc(value)
+        require(observed - timedelta(hours=24) <= stamp <= observed and
+                stamp.date() == observed.date(), "Inventory/query receipt stale or wrong query day")
+
+    inventory = receipt["inventory"]
+    fresh(inventory["observed_utc"])
+    root = inventory["response"]
+    require(re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", root["tenantId"]) and root["name"] == root["tenantId"] and
+            root["id"] == inventory["scope"] ==
+            f'/providers/Microsoft.Management/managementGroups/{root["tenantId"]}' and
+            root["details"]["parent"] is None, "Complete tenant-root inventory required")
+    subscriptions = set()
+
+    def walk(node):
+        require(isinstance(node, dict) and not node.get("nextLink"), "Paginated/invalid inventory forbidden")
+        if node["type"] == "/subscriptions":
+            identifier = node["name"]
+            require(re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", identifier) and
+                    node["id"] == f"/subscriptions/{identifier}" and identifier not in subscriptions and
+                    node.get("children") in (None, []), "Invalid/duplicate inventory subscription")
+            subscriptions.add(identifier)
+        else:
+            require(node["type"] == "Microsoft.Management/managementGroups" and
+                    isinstance(node.get("children"), (list, type(None))), "Invalid inventory node")
+            for child in node["children"] or []:
+                walk(child)
+
+    walk(root)
+    require(evidence.get("inventory_sha256") == canonical_hash(root),
+            "Qualified tenant inventory digest mismatch")
+    require(subscriptions and binding["upgrade"]["vm_id"].split("/")[2] in subscriptions,
+            "Target subscription absent from tenant-root inventory")
+    queries = receipt["queries"]
+    require(isinstance(queries, list) and len(queries) == len(subscriptions),
+            "Complete per-subscription queries required")
+    expected_request = {"type": "ActualCost", "timeframe": "MonthToDate", "dataset": {
+        "granularity": "Daily", "aggregation": {"totalCost": {"name": "PreTaxCost", "function": "Sum"}}}}
+    daily, seen = {}, set()
+    complete_days = {(observed.date().replace(day=1) + timedelta(days=d)).strftime("%Y%m%d")
+                     for d in range(observed.day - 1)}
+    for query in queries:
+        sub = query["subscription_id"]
+        require(sub in subscriptions and sub not in seen and query["scope"] == f"/subscriptions/{sub}",
+                "Query scopes do not exactly cover inventory")
+        seen.add(sub)
+        fresh(query["observed_utc"])
+        require(type(query["http_status"]) is int and query["http_status"] == 200 and
+                query["request"] == expected_request, "Successful unfiltered actual-MTD query required")
+        response = query["response"]
+        require(response["type"] == "Microsoft.CostManagement/query" and
+                re.fullmatch(rf"/?subscriptions/{re.escape(sub)}/providers/Microsoft.CostManagement/query/[^/]+",
+                             response["id"]), "Query response scope mismatch")
+        props = response["properties"]
+        require(props.get("nextLink") is None and "nextLink" in props and not response.get("nextLink"),
+                "Paginated cost query forbidden")
+        require(props["columns"] == [{"name": "PreTaxCost", "type": "Number"},
+                                    {"name": "UsageDate", "type": "Number"},
+                                    {"name": "Currency", "type": "String"}],
+                "Actual-cost columns missing/wrong currency schema")
+        dates = set()
+        require(isinstance(props["rows"], list), "Actual-cost rows required")
+        for row in props["rows"]:
+            require(isinstance(row, list) and len(row) == 3 and type(row[1]) is int and row[2] == "USD",
+                    "Invalid cost row or mixed currency")
+            day = str(row[1])
+            require(day in complete_days | {observed.strftime("%Y%m%d")} and day not in dates,
+                    "Duplicate/out-of-period actual cost")
+            dates.add(day)
+            daily[day] = daily.get(day, Decimal(0)) + amount(row[0])
+        require(complete_days <= dates, "Partial actual-cost daily coverage")
+    require(seen == subscriptions, "Incomplete tenant subscription coverage")
+    require(evidence.get("query_manifest_sha256") == query_manifest_hash(queries),
+            "Qualified per-subscription query manifest digest mismatch")
+    actual = sum(daily.values(), Decimal(0))
+    require(actual > 0, "Zero tenant actual cost is not qualified")
+    require(amount(receipt["actual_mtd_usd"]) == actual.quantize(Decimal(".01"), rounding=ROUND_CEILING) and
+            amount(evidence["actual_mtd_usd"]) == amount(receipt["actual_mtd_usd"]),
+            "Actual cost total/qualification mismatch")
+    projection = receipt["projection"]
+    days = [(observed.date() - timedelta(days=d)).strftime("%Y%m%d") for d in range(7, 0, -1)]
+    require(projection["kind"] == "operator_highest_seven_completed_days_plus_mtd_through_authorized_horizon" and
+            projection["completed_days"] == days and set(days) <= complete_days,
+            "Completed-day projection basis missing")
+    horizon = utc(inputs["budget_horizon_utc"])
+    require(horizon == AUTHORIZED_HORIZON and now < horizon and observed < horizon,
+            "Authorized October 15 budget horizon missing/expired")
+    remaining = (horizon.date() - observed.date()).days + 1
+    require(type(projection["remaining_days"]) is int and projection["remaining_days"] == remaining,
+            "Projection must reserve full current partial day through authorized horizon")
+    require(isinstance(projection["billing_lag_basis"], str) and projection["billing_lag_basis"].strip(),
+            "Declared billing-lag basis required")
+    bound = max(daily[d] for d in days)
+    lag_days = projection["billing_lag_additional_days"]
+    require(bound > 0 and abs(amount(projection["daily_bound_usd"]) - bound) <= Decimal(".00000001"),
+            "Observed high-day projection bound mismatch")
+    require(type(lag_days) is int and lag_days >= 2 and
+            abs(amount(inputs["billing_lag_reserve_usd"]) - bound * lag_days) <= Decimal(".00000001"),
+            "Billing-lag reserve must cover at least two observed high-cost days")
+    projected = (actual + bound * (remaining + lag_days) +
+                 amount(inputs["vm_reserve_usd"])).quantize(
+                     Decimal(".01"), rounding=ROUND_CEILING)
+    require(projected > 0 and amount(projection["projected_horizon_usd"]) == projected and
+            amount(evidence["projected_horizon_usd"]) == projected,
+            "Projection total/qualification mismatch")
+
+
+def qualify(binding, evidence, sha, now=None, cost_receipt=None):
     now = now or datetime.now(timezone.utc)
     require(re.fullmatch(r"[0-9a-f]{40}", sha), "Full reviewed source commit required")
     require(binding.get("upgrade") is not None, "Private exact upgrade binding missing")
@@ -42,7 +207,7 @@ def qualify(binding, evidence, sha, now=None):
     require(upgrade["vm_size"] == "Standard_D8s_v5" and upgrade["os_disk_sku"] == "Premium_LRS",
             "Unsupported upgrade SKU")
     require(evidence["source_sha"] == sha, "Qualification belongs to another source revision")
-    binding_sha = hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    binding_sha = canonical_hash(binding)
     require(evidence["binding_sha256"] == binding_sha, "Qualification binding hash mismatch")
     require(evidence["owner"] == "haflidif" and evidence["downtime_accepted"] is True,
             "Exact downtime/owner qualification missing")
@@ -54,19 +219,24 @@ def qualify(binding, evidence, sha, now=None):
             "Cost/target evidence stale or in future")
     require(now < utc(evidence["expires_utc"]) <= utc(evidence["observed_utc"]) + timedelta(hours=24),
             "Qualification expired")
-    numbers = [evidence["tenant_limit_usd"], evidence["projected_eom_usd"],
-               evidence["incremental_reserve_usd"]]
-    require(all(isinstance(n, (int, float)) and not isinstance(n, bool) and math.isfinite(n) and n >= 0
-                for n in numbers), "Finite non-negative cost values required")
+    check_cost_receipt(cost_receipt, evidence, binding, sha, binding_sha, now)
+    numbers = [evidence["tenant_limit_usd"], evidence["projected_horizon_usd"], evidence["vm_reserve_usd"]]
+    for number in numbers:
+        amount(number)
     require(evidence["tenant_limit_usd"] == 2500, "Tenant cap must remain USD2500")
     require(evidence["budget_accepted"] is True and
-            evidence["projected_eom_usd"] + evidence["incremental_reserve_usd"] <= 2500,
+            amount(evidence["projected_horizon_usd"]) <= 2500,
             "BLOCKED: total tenant budget headroom unqualified; no cap override")
-    require(evidence["incremental_reserve_usd"] >= 29.49, "Insufficient 72h conservative reserve")
+    require(evidence["vm_reserve_usd"] >= 60, "Insufficient full 72h conservative VM reserve")
     require(evidence["quota_accepted"] is True and evidence["windows_client_eligibility_accepted"] is True,
             "Quota/licensing qualification missing")
-    require(evidence["duration_hours"] == 72 and evidence["return_plan_owner"] == "haflidif",
+    require(type(evidence["duration_hours"]) is int and evidence["duration_hours"] == 72 and evidence["return_plan_owner"] == "haflidif",
             "Reviewed three-day return plan owner missing; no automatic downgrade")
+    start, end = utc(evidence["planned_start_utc"]), utc(evidence["planned_return_utc"])
+    require(start >= utc(evidence["observed_utc"]) and start < AUTHORIZED_HORIZON and
+            end == min(start + timedelta(hours=72), AUTHORIZED_HORIZON) and now < end and
+            utc(evidence["expires_utc"]) <= min(end, AUTHORIZED_HORIZON),
+            "Private planned return must bound 72h/deadline and qualification expiry")
     require(upgrade["bootstrap"]["repository"] and
             re.fullmatch(r"[a-f0-9]{40}", upgrade["bootstrap"]["commit"]), "Immutable payload commit missing")
     return binding_sha
@@ -93,7 +263,9 @@ def check_plan(plan, upgrade):
     before, after = vm["before"], vm["after"]
     require(after.get("id", "").lower() == upgrade["vm_id"].lower() and
             before.get("id", "").lower() == upgrade["vm_id"].lower(), "VM ID not bound")
-    require(not vm.get("after_unknown", {}).get("body"), "Unknown VM body forbidden")
+    markers = vm.get("after_unknown", {})
+    require(isinstance(markers, dict), "Invalid Terraform unknown marker shape")
+    require(not unknown_leaves(markers.get("body", False)), "Unknown VM body forbidden")
     for key in ("type", "name", "location", "parent_id", "tags", "identity"):
         require(before.get(key) == after.get(key), "VM non-performance metadata change")
     old = copy.deepcopy(before["body"])
@@ -145,12 +317,21 @@ def check_plan(plan, upgrade):
             props["typeHandlerVersion"] == "1.10" and props["autoUpgradeMinorVersion"] is False,
             "Unreviewed CSE handler")
     # Check the *actual emitted command*, not a status-only plan label.
-    import base64
     command = props["settings"]["commandToExecute"]
-    prefix = "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand "
-    require(command.startswith(prefix) and set(props["settings"]) == {"commandToExecute"},
+    require(command.startswith(COMMAND_PREFIX) and set(props["settings"]) == {"commandToExecute"},
             "Unexpected CSE command/settings")
-    actual = base64.b64decode(command[len(prefix):], validate=True).decode("utf-16le")
+    require(len(command) <= 7500, "CSE command exceeds safe Windows cmd launch bound")
+    launcher = base64.b64decode(command[len(COMMAND_PREFIX):], validate=True).decode("utf-16le")
+    match = re.search(r"\[Convert\]::FromBase64String\('([A-Za-z0-9+/=]+)'\)", launcher)
+    require(match is not None, "CSE command differs from reviewed wrapper launcher")
+    expected_launcher = Path(__file__).with_name("Invoke-CompressedBootstrap.ps1.tftpl").read_text(encoding="utf-8")
+    expected_launcher = expected_launcher.replace("${payload_gzip}", match[1])
+    require(launcher.replace("\r\n", "\n") == expected_launcher.replace("\r\n", "\n"),
+            "CSE command differs from reviewed wrapper launcher")
+    with gzip.GzipFile(fileobj=io.BytesIO(base64.b64decode(match[1], validate=True))) as stream:
+        decoded = stream.read(65537)
+    require(len(decoded) <= 65536, "Compressed wrapper exceeds trusted size bound")
+    actual = decoded.decode("utf-8")
     payload = upgrade["bootstrap"]
     expected = Path(__file__).with_name("Invoke-MachineBootstrap.ps1.tftpl").read_text(encoding="utf-8")
     for name, value in {
@@ -184,7 +365,7 @@ def snapshot(upgrade):
                     data["managedBy"].lower() == upgrade["vm_id"].lower(), "Live disk baseline changed")
         # Canonical whole GET hashes detect drift, including foreign policy writes,
         # without publishing any ARM response, principal or target identifiers.
-        result[label] = hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        result[label] = canonical_hash(data)
     return result
 
 
@@ -195,7 +376,8 @@ def main():
     args = parser.parse_args()
     binding = json.loads(Path("upgrade.auto.tfvars.json").read_text(encoding="utf-8"))
     evidence = json.loads(Path("qualification.json").read_text(encoding="utf-8"))
-    qualify(binding, evidence, args.sha)
+    receipt = json.loads(Path("cost-receipt.json").read_text(encoding="utf-8"))
+    qualify(binding, evidence, args.sha, cost_receipt=receipt)
     if args.operation == "qualify":
         print("Qualification accepted; no execution approval implied")
     elif args.operation == "plan":
@@ -206,8 +388,7 @@ def main():
     elif args.operation == "seal":
         seal = {"source_sha": args.sha, "created_utc": datetime.now(timezone.utc).isoformat(),
                 "run_id": os.environ["GITHUB_RUN_ID"], "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
-                "files": {p: digest(p) for p in ("tfplan", "baseline.json", "upgrade.auto.tfvars.json", "qualification.json",
-                                               ".terraform.lock.hcl")}}
+                "files": {p: digest(p) for p in sorted(SEALED_FILES)}}
         Path("seal.json").write_text(json.dumps(seal), encoding="utf-8")
     else:
         seal = json.loads(Path("seal.json").read_text(encoding="utf-8"))
@@ -215,8 +396,7 @@ def main():
                 seal["run_attempt"] == os.environ["GITHUB_RUN_ATTEMPT"], "Plan/source/run binding mismatch")
         require(datetime.now(timezone.utc) - timedelta(hours=24) <= utc(seal["created_utc"]) <=
                 datetime.now(timezone.utc), "Saved plan expired")
-        require(set(seal["files"]) == {"tfplan", "baseline.json", "upgrade.auto.tfvars.json",
-                                      "qualification.json", ".terraform.lock.hcl"}, "Incomplete sealed file set")
+        require(set(seal["files"]) == SEALED_FILES, "Incomplete sealed file set")
         require(all(digest(p) == value for p, value in seal["files"].items()), "Sealed file hash mismatch")
         require(snapshot(binding["upgrade"]) == json.loads(Path("baseline.json").read_text(encoding="utf-8")),
                 "Live baseline changed since reviewed plan; new plan and approvals required")

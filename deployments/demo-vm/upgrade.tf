@@ -51,11 +51,16 @@ resource "azapi_resource_action" "upgrade_start" {
 }
 
 locals {
-  machine_bootstrap_command = var.upgrade == null ? null : "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${textencodebase64(templatefile("${path.module}/scripts/Invoke-MachineBootstrap.ps1.tftpl", {
+  machine_bootstrap_wrapper = var.upgrade == null ? null : templatefile("${path.module}/scripts/Invoke-MachineBootstrap.ps1.tftpl", {
     script_url      = "https://raw.githubusercontent.com/${var.upgrade.bootstrap.repository}/${var.upgrade.bootstrap.commit}/${var.upgrade.bootstrap.script_path}"
     manifest_url    = "https://raw.githubusercontent.com/${var.upgrade.bootstrap.repository}/${var.upgrade.bootstrap.commit}/${var.upgrade.bootstrap.manifest_path}"
     script_sha256   = upper(var.upgrade.bootstrap.script_sha256)
     manifest_sha256 = upper(var.upgrade.bootstrap.manifest_sha256)
+  })
+  # Compress only the reviewed wrapper in memory. No payload/credentials file,
+  # checksum bypass or command-shell quoting; PS5.1 decodes the UTF-8 GZip.
+  machine_bootstrap_command = var.upgrade == null ? null : "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${textencodebase64(templatefile("${path.module}/scripts/Invoke-CompressedBootstrap.ps1.tftpl", {
+    payload_gzip = base64gzip(local.machine_bootstrap_wrapper)
   }), "UTF-16LE")}"
 }
 
@@ -80,6 +85,11 @@ resource "azapi_resource" "machine_bootstrap" {
 
   lifecycle {
     prevent_destroy = true
+
+    precondition {
+      condition     = length(local.machine_bootstrap_command) <= 7500
+      error_message = "CSE command exceeds the 7500-character safe launch bound (Windows cmd limit 8191, including prefix margin). Shorten the immutable payload paths; never bypass hashes."
+    }
   }
 
   # CSE needs a running guest after the disk-only conversion.

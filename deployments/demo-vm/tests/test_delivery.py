@@ -3,6 +3,7 @@ import base64
 import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
+import gzip
 import importlib.util
 import json
 import os
@@ -25,27 +26,80 @@ policy = load("check_environment")
 VM_ID = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Compute/virtualMachines/vm-demo-copilot"
 DISK_ID = VM_ID.split("/providers/")[0] + "/providers/Microsoft.Compute/disks/restored-offline-disk"
 SHA = "1" * 40
+NOW = datetime(2026, 10, 12, 19, tzinfo=timezone.utc)
 
 
 def binding():
     return {"upgrade": {"vm_id": VM_ID, "os_disk_id": DISK_ID, "vm_size": "Standard_D8s_v5",
                         "os_disk_sku": "Premium_LRS", "bootstrap": {
-                            "repository": "example/offline-payload", "commit": SHA,
+                            "repository": "example/offline-payload", "commit": "f04ec69afe46971118493b8a1434a1e2b398f814",
                             "script_path": "public/scripts/bootstrap-demo-vm.ps1",
                             "manifest_path": "public/scripts/bootstrap-demo-vm.packages.json",
-                            "script_sha256": "a" * 64, "manifest_sha256": "b" * 64,
+                            "script_sha256": "3cc9fe4eb576c3795d0550e235c97d94227a992b32bd078ce6b2920fdc2c2ca8",
+                            "manifest_sha256": "9ea0fd7ab57759ee029b5604e17fd579c3e84f4f5c63e664c81837fb501cc7c0",
                             "system_accepted": True}}}
 
 
 def evidence(b, now):
+    receipt = cost_receipt(b, now)
     return {"source_sha": SHA, "binding_sha256": hashlib.sha256(json.dumps(
         b, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
         "owner": "haflidif", "downtime_accepted": True, "system_payload_accepted": True,
         "all_subscription_coverage": True, "currency": "USD", "observed_utc": now.isoformat(),
         "expires_utc": (now + timedelta(hours=1)).isoformat(), "tenant_limit_usd": 2500,
-        "projected_eom_usd": 2000, "incremental_reserve_usd": 29.49, "budget_accepted": True,
+        "actual_mtd_usd": receipt["actual_mtd_usd"],
+        "cost_receipt_sha256": guard.canonical_hash(receipt),
+        "inventory_sha256": guard.canonical_hash(receipt["inventory"]["response"]),
+        "query_manifest_sha256": guard.query_manifest_hash(receipt["queries"]),
+        "projected_horizon_usd": receipt["projection"]["projected_horizon_usd"],
+        "vm_reserve_usd": 60, "billing_lag_reserve_usd": receipt["qualification_inputs"]["billing_lag_reserve_usd"],
+        "budget_accepted": True,
+        "budget_horizon_utc": guard.AUTHORIZED_HORIZON.isoformat(),
+        "planned_start_utc": now.isoformat(),
+        "planned_return_utc": min(now + timedelta(hours=72), guard.AUTHORIZED_HORIZON).isoformat(),
         "quota_accepted": True, "windows_client_eligibility_accepted": True,
         "duration_hours": 72, "return_plan_owner": "haflidif"}
+
+
+def cost_receipt(b, now, daily_costs=(30, 20)):
+    """Public synthetic full inventory/query receipts, never real tenant data."""
+    tenant = "00000000-0000-0000-0000-000000000010"
+    subs = ["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002"]
+    root_id = f"/providers/Microsoft.Management/managementGroups/{tenant}"
+    daily = sum(daily_costs)
+    remaining = (guard.AUTHORIZED_HORIZON.date() - now.date()).days + 1
+    return {"schema_version": 1, "source_sha": SHA, "binding_sha256": guard.canonical_hash(b),
+            "observed_utc": now.isoformat(), "currency": "USD",
+            "qualification_inputs": {"tenant_limit_usd": 2500, "vm_reserve_usd": 60,
+                                     "billing_lag_reserve_usd": daily * 2, "duration_hours": 72,
+                                     "budget_horizon_utc": guard.AUTHORIZED_HORIZON.isoformat(),
+                                     "planned_start_utc": now.isoformat(),
+                                     "planned_return_utc": min(now + timedelta(hours=72), guard.AUTHORIZED_HORIZON).isoformat()},
+            "actual_mtd_usd": daily * now.day,
+            "projection": {"kind": "operator_highest_seven_completed_days_plus_mtd_through_authorized_horizon",
+                           "completed_days": [(now - timedelta(days=d)).strftime("%Y%m%d") for d in range(7, 0, -1)],
+                           "remaining_days": remaining, "billing_lag_basis": "Synthetic operator lag allowance",
+                           "daily_bound_usd": daily, "billing_lag_additional_days": 2,
+                           "projected_horizon_usd": daily * (now.day + remaining + 2) + 60},
+            "inventory": {"observed_utc": now.isoformat(), "scope": root_id, "response": {
+                "tenantId": tenant, "id": root_id, "name": tenant,
+                "type": "Microsoft.Management/managementGroups", "details": {"parent": None},
+                "children": [{"id": f"/subscriptions/{s}", "name": s, "type": "/subscriptions",
+                              "children": None} for s in subs]}},
+            "queries": [{"subscription_id": s, "scope": f"/subscriptions/{s}", "http_status": 200,
+                         "observed_utc": now.isoformat(), "request": {
+                             "type": "ActualCost", "timeframe": "MonthToDate", "dataset": {
+                                 "granularity": "Daily", "aggregation": {
+                                     "totalCost": {"name": "PreTaxCost", "function": "Sum"}}}},
+                         "response": {"id": f"subscriptions/{s}/providers/Microsoft.CostManagement/query/offline",
+                                      "type": "Microsoft.CostManagement/query", "properties": {
+                                          "nextLink": None, "columns": [
+                                              {"name": "PreTaxCost", "type": "Number"},
+                                              {"name": "UsageDate", "type": "Number"},
+                                              {"name": "Currency", "type": "String"}],
+                                          "rows": [[daily_costs[i], int(now.replace(day=d).strftime("%Y%m%d")), "USD"]
+                                                   for d in range(1, now.day + 1)]}}}
+                        for i, s in enumerate(subs)]}
 
 
 def emitted_command(upgrade):
@@ -58,8 +112,10 @@ def emitted_command(upgrade):
         "script_sha256": b["script_sha256"].upper(), "manifest_sha256": b["manifest_sha256"].upper()
     }.items():
         text = text.replace("${" + key + "}", value)
-    return "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand " + \
-        base64.b64encode(text.encode("utf-16le")).decode()
+    compressed = base64.b64encode(gzip.compress(text.encode("utf-8"), mtime=0)).decode()
+    launcher = (ROOT / "scripts" / "Invoke-CompressedBootstrap.ps1.tftpl").read_text(encoding="utf-8")
+    launcher = launcher.replace("${payload_gzip}", compressed)
+    return guard.COMMAND_PREFIX + base64.b64encode(launcher.encode("utf-16le")).decode()
 
 
 def plan():
@@ -145,7 +201,7 @@ class DeliveryContracts(unittest.TestCase):
         def corrupt(c):
             command = c["after"]["body"]["properties"]["settings"]["commandToExecute"]
             prefix, encoded = command.rsplit(" ", 1)
-            text = base64.b64decode(encoded).decode("utf-16le").replace("-AllUsers", "-PerUser")
+            text = base64.b64decode(encoded).decode("utf-16le").replace("exit $LASTEXITCODE", "exit 0")
             c["after"]["body"]["properties"]["settings"]["commandToExecute"] = prefix + " " + \
                 base64.b64encode(text.encode("utf-16le")).decode()
         self.mutate(guard.CSE, corrupt, "differs from reviewed wrapper")
@@ -158,21 +214,22 @@ class DeliveryContracts(unittest.TestCase):
             guard.check_plan(p, binding()["upgrade"])
 
     def test_cost_headroom_and_provenance(self):
-        b, now = binding(), datetime.now(timezone.utc)
+        b, now = binding(), NOW
         good = evidence(b, now)
-        self.assertEqual(guard.qualify(b, good, SHA, now), good["binding_sha256"])
+        receipt = cost_receipt(b, now)
+        self.assertEqual(guard.qualify(b, good, SHA, now, receipt), good["binding_sha256"])
         for key, value, message in [
-            ("projected_eom_usd", 4005, "headroom"), ("tenant_limit_usd", 3000, "USD2500"),
+            ("projected_horizon_usd", 4005, "Projection total"), ("tenant_limit_usd", 3000, "qualification inputs"),
             ("all_subscription_coverage", False, "coverage"), ("downtime_accepted", False, "downtime"),
             ("source_sha", "2" * 40, "another source"), ("system_payload_accepted", False, "SYSTEM"),
             ("expires_utc", (now - timedelta(seconds=1)).isoformat(), "expired"),
             ("observed_utc", (now - timedelta(hours=25)).isoformat(), "stale"),
-            ("projected_eom_usd", float("nan"), "Finite"),
+            ("projected_horizon_usd", float("nan"), "Finite"),
         ]:
             with self.subTest(key=key):
                 bad = dict(good, **{key: value})
                 with self.assertRaisesRegex(ValueError, message):
-                    guard.qualify(b, bad, SHA, now)
+                    guard.qualify(b, bad, SHA, now, receipt)
 
     def test_snapshot_is_read_only_exact_target(self):
         vm = {"id": VM_ID, "properties": {"hardwareProfile": {"vmSize": "Standard_D4s_v5"},
