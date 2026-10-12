@@ -16,10 +16,57 @@ import urllib.parse
 import urllib.request
 import uuid
 from guard import (ROOT, GateError, check_template, check_parameters, check_baseline,
-                   check_whatif, graph, parameters, require, validate_scope)
+                   check_whatif, diagnostics_complete, graph, parameters, require, validate_scope)
 
 ARM='https://management.azure.com'
 API='2025-04-01'
+VALIDATION_STATES={'NotSpecified','Accepted','Running','Ready','Creating','Created',
+                   'Deleting','Deleted','Canceled','Failed','Succeeded','Updating'}
+TRANSIENT_HTTP={429,500,502,503,504}
+
+def arm_url(value, reason='NATIVE_ASYNC_POLL_URL'):
+    require(isinstance(value,str) and bool(value), reason)
+    decoded=urllib.parse.unquote(value)
+    require(not any(c.isspace() or ord(c)<32 or ord(c)==127 for c in decoded) and
+            '\\' not in decoded and not decoded.startswith('//'), reason)
+    try:
+        parsed=urllib.parse.urlsplit(value)
+        require(not parsed.fragment, reason)
+        if not parsed.scheme:
+            require(value.startswith('/') and not parsed.netloc, reason)
+        resolved=urllib.parse.urljoin(ARM+'/',value)
+        parsed=urllib.parse.urlsplit(resolved)
+        require(parsed.scheme=='https' and parsed.netloc=='management.azure.com' and
+                parsed.username is None and parsed.password is None and
+                parsed.path.startswith('/'), reason)
+    except ValueError:
+        raise GateError(reason) from None
+    return resolved
+
+class ArmNoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Retain the redirect response, never forward a bearer token elsewhere.
+        return None
+
+def native_state(label, value):
+    if not isinstance(value,dict) or value.get('error') is not None:
+        return None
+    props=value.get('properties')
+    if isinstance(props,dict) and (props.get('error') is not None or not diagnostics_complete(props)):
+        return None
+    if label=='validate':
+        if (not isinstance(props,dict) or not isinstance(props.get('provisioningState'),str) or
+                props['provisioningState'] not in VALIDATION_STATES):
+            return None
+        if 'status' in value and value['status']!='Succeeded':
+            return None
+        return props['provisioningState']
+    state=value.get('status')
+    if not isinstance(state,str) or not state.strip():
+        return None
+    if state=='Succeeded' and (not isinstance(props,dict) or not isinstance(props.get('changes'),list)):
+        return None
+    return state
 
 def write(path, data):
     # Exclusive files; previously captured raw evidence is never replaced.
@@ -74,8 +121,8 @@ def private_directory(env):
 class AzureReadOnly:
     def __init__(self, token, directory):
         self.token=token; self.directory=directory; self.counter=0
-    def request(self, label, method, url, body=None):
-        require(url.startswith(ARM+'/'), 'ARM_HOST_ONLY')
+    def request(self, label, method, url, body=None, timeout=60):
+        require(url==arm_url(url,'ARM_HOST_ONLY'), 'ARM_HOST_ONLY')
         data=json.dumps(body).encode() if body is not None else None
         request_id=str(uuid.uuid4())
         req=urllib.request.Request(url,data=data,method=method,
@@ -83,9 +130,9 @@ class AzureReadOnly:
                      'x-ms-client-request-id':request_id})
         started=datetime.now(timezone.utc).isoformat()
         try:
-            response=urllib.request.urlopen(req,timeout=60)
+            response=urllib.request.build_opener(ArmNoRedirect()).open(req,timeout=timeout)
         except urllib.error.HTTPError as error: response=error
-        except Exception as error:
+        except (urllib.error.URLError,TimeoutError,OSError) as error:
             self.counter+=1
             write(self.directory/f'{self.counter:03d}-{label}-transport.json',dict(method=method,url=url,startedUTC=started,requestId=request_id,error=type(error).__name__))
             raise GateError('ARM_TRANSPORT_FAILED') from None
@@ -97,24 +144,56 @@ class AzureReadOnly:
                     startedUTC=started,completedUTC=datetime.now(timezone.utc).isoformat(),rawSha256=hashlib.sha256(data).hexdigest())
         write(self.directory/f'{self.counter:03d}-{label}.http.json',record)
         try: value=json.loads(data)
-        except Exception: value=None
+        except (json.JSONDecodeError,UnicodeDecodeError): value=None
         return status,{k.lower():v for k,v in headers.items()},value
     def operation(self, label, url, body):
-        status,headers,value=self.request(label,'POST',url,body)
-        if status not in (200,201,202): return False,value
+        require(label in ('validate','whatif'), 'NATIVE_OPERATION_REQUIRED')
         deadline=time.monotonic()+300
-        while status==202 or (isinstance(value,dict) and value.get('status') in ('Accepted','Running','InProgress')):
-            poll=headers.get('azure-asyncoperation') or headers.get('location')
-            require(bool(poll) and poll.startswith(ARM+'/'), 'NATIVE_ASYNC_POLL_URL')
+        status,headers,value=self.request(label,'POST',url,body)
+        monitor=None; result=None; poll=None; polling=None
+        while True:
             require(time.monotonic()<deadline, 'NATIVE_ASYNC_DEADLINE')
-            try: delay=min(30,max(1,int(headers.get('retry-after','2'))))
-            except ValueError: delay=2
+            if status in TRANSIENT_HTTP and poll is not None:
+                pass  # Retry GET only; the original POST is never resubmitted.
+            elif status not in (200,201,202):
+                return False,value
+            else:
+                if isinstance(value,dict):
+                    props=value.get('properties')
+                    if value.get('error') is not None or (isinstance(props,dict) and props.get('error') is not None):
+                        return False,value
+                if 'azure-asyncoperation' in headers: monitor=arm_url(headers['azure-asyncoperation'])
+                if 'location' in headers: result=arm_url(headers['location'])
+                if polling=='monitor':
+                    state=value.get('status') if isinstance(value,dict) else None
+                    if not isinstance(state,str) or not state.strip() or state in ('Failed','Canceled'):
+                        return False,value
+                    if state=='Succeeded':
+                        # An Azure-AsyncOperation receipt is not DeploymentValidateResult
+                        # or WhatIfOperationResult. Fetch the separately supplied Location.
+                        require(result is not None and result!=monitor, 'NATIVE_RESULT_URL_REQUIRED')
+                        poll=result; polling='result'
+                    else:
+                        poll=monitor
+                else:
+                    state=native_state(label,value)
+                    if state in ('Failed','Canceled'): return False,value
+                    if state=='Succeeded' and status==200: return True,value
+                    if state is None and not (status==202 and value in (None,{})):
+                        return False,value
+                    if monitor is not None and polling is None:
+                        poll=monitor; polling='monitor'
+                    elif result is not None:
+                        poll=result; polling='result'
+                    require(poll is not None, 'NATIVE_ASYNC_POLL_URL')
+            retry=headers.get('retry-after','2')
+            require(isinstance(retry,str) and retry.isascii() and retry.isdecimal(), 'NATIVE_RETRY_AFTER')
+            delay=max(1,int(retry))
+            require(delay<deadline-time.monotonic(), 'NATIVE_ASYNC_DEADLINE')
             time.sleep(delay)
-            old_poll=poll
-            status,new_headers,value=self.request(label+'-poll','GET',poll)
-            headers={**headers,**new_headers,'azure-asyncoperation':old_poll}
-            if status not in (200,201,202): return False,value
-        return isinstance(value,dict) and value.get('status','Succeeded')=='Succeeded' and 'error' not in value,value
+            remaining=deadline-time.monotonic()
+            require(remaining>0, 'NATIVE_ASYNC_DEADLINE')
+            status,headers,value=self.request(label+'-poll','GET',poll,timeout=min(60,remaining))
 
 def exchange(s, env, directory):
     request_url=env.get('ACTIONS_ID_TOKEN_REQUEST_URL','')

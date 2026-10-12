@@ -164,23 +164,35 @@ def check_baseline(raw, s):
     require(all(v['status']==404 and v['errorCode'] in ('ResourceNotFound','ResourceGroupNotFound','RoleAssignmentNotFound') for v in raw.values()), 'BASELINE_NOT_ABSENT')
 
 def check_whatif(raw, s):
-    require(raw.get('status')=='Succeeded', 'WHATIF_FAILED_STATUS')
-    require(isinstance(raw.get('changes'),list), 'WHATIF_FULL_RAW_REQUIRED')
+    require(isinstance(raw,dict) and raw.get('status')=='Succeeded', 'WHATIF_FAILED_STATUS')
+    props=raw.get('properties')
+    require(isinstance(props,dict) and isinstance(props.get('changes'),list), 'WHATIF_FULL_RAW_REQUIRED')
+    require(raw.get('error') is None and props.get('error') is None, 'WHATIF_ERROR')
+    require(diagnostics_complete(props), 'WHATIF_DIAGNOSTICS_REQUIRE_REVIEW')
+    require('potentialChanges' not in props or props['potentialChanges']==[], 'WHATIF_INCOMPLETE_RESULTS')
     expected={o['id'].lower():o for o in graph(s)}
     seen=set()
     # No allowlist for extra deployments: ARM full what-if must expose exactly the
     # five durable leaves. Unsupported/opaque nested expansions require review.
-    for change in raw['changes']:
-        rid=change.get('resourceId','').lower()
+    for change in props['changes']:
+        require(isinstance(change,dict) and isinstance(change.get('resourceId'),str), 'WHATIF_FULL_RAW_REQUIRED')
+        rid=change['resourceId'].lower()
         require(rid in expected, 'WHATIF_OUTSIDE_FIVE')
         require(rid not in seen, 'WHATIF_DUPLICATE_ID'); seen.add(rid)
         require(change.get('changeType')=='Create', 'WHATIF_NOT_CREATE')
         require(change.get('before') in (None,{}), 'WHATIF_EXISTING_RESOURCE')
         after=change.get('after'); require(isinstance(after,dict), 'WHATIF_PAYLOAD_REQUIRED')
         obj=expected[rid]
-        require(after.get('type','').lower()==obj['type'].lower(), 'WHATIF_TYPE')
+        require(isinstance(after.get('type'),str) and after['type'].lower()==obj['type'].lower(), 'WHATIF_TYPE')
         require(after.get('apiVersion',obj['apiVersion'])==obj['apiVersion'], 'WHATIF_API')
         if 'location' in obj: require(after.get('location')==obj['location'], 'WHATIF_LOCATION')
         require(after.get('properties')==obj['properties'], 'WHATIF_PROPERTIES')
         require(not(set(after)-{'id','name','type','apiVersion','location','properties'}), 'WHATIF_EXTRA_FIELDS')
     require(seen==set(expected), 'WHATIF_MISSING_LEAF')
+
+def diagnostics_complete(props):
+    # ARM warns when nested expansion/validation is skipped. Such success-shaped
+    # partial results require review; informational diagnostics remain untouched.
+    diagnostics=props.get('diagnostics',[])
+    return (isinstance(diagnostics,list) and
+            all(isinstance(d,dict) and d.get('level')=='Info' for d in diagnostics))

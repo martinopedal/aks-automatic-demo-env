@@ -106,6 +106,24 @@ returns an authorization/service denial. All asynchronous responses, numeric
 HTTP statuses, request IDs/headers, timings and full raw errors are captured
 before interpretation. No excludes/reduced payloads/success-shaped failed plan.
 
+The `2025-04-01` [native what-if result](https://learn.microsoft.com/rest/api/resources/deployments/what-if-at-subscription-scope?view=rest-resources-2025-04-01)
+retains its complete envelope: the five changes are at `properties.changes`, not
+a flattened CLI/proxy `changes` field. Nonempty `properties.potentialChanges`,
+warning/error diagnostics (including skipped nested expansion), malformed
+diagnostics and errors require review; informational diagnostics are retained.
+[Native validation](https://learn.microsoft.com/rest/api/resources/deployments/validate-at-subscription-scope?view=rest-resources-2025-04-01)
+requires an actual `properties.provisioningState: Succeeded` result. Empty bodies,
+failed/canceled states and status-only async receipts cannot qualify it.
+
+Documented root-relative `Location` headers resolve against the HTTPS ARM origin.
+Polling rejects external/protocol-relative URLs, userinfo, escaped backslashes,
+control characters and fragments; HTTP redirects are recorded, never followed.
+When `Azure-AsyncOperation` is supplied, its successful status still requires the
+separate `Location` result. Nonterminal results and transient polling GET failures
+remain bounded by a five-minute deadline, honoring integer `Retry-After` without
+shortening it; the POST is never retried. Every poll retains its own full raw
+bytes and numeric HTTP record, including failures.
+
 Source, compiled template, parameters, private scope, current-run bindings,
 baseline and every raw response are SHA256 sealed before independent review.
 A failure is explicitly `FAILED_READONLY`. There is no apply action or fake
