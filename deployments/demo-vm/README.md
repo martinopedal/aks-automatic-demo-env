@@ -98,8 +98,34 @@ into success. A fresh plan and fresh approvals are required after drift/expiry.
 
 ## Private input preparation (owner, not a public var file)
 
-In the existing protected `online` environment, set
-`DEMO_VM_UPGRADE_BINDING_JSON` to an object containing `upgrade`:
+In the existing protected `online` environment, the authorized owner must set
+these three **GitHub environment secrets**, never Actions configuration variables:
+
+| Required environment secret | Private content |
+| --- | --- |
+| `DEMO_VM_UPGRADE_BINDING_JSON` | Exact existing-target and immutable bootstrap binding |
+| `DEMO_VM_UPGRADE_QUALIFICATION_JSON` | Source-bound owner qualification and planned return |
+| `DEMO_VM_UPGRADE_COST_RECEIPT_JSON` | Complete tenant inventory and original cost-query receipts |
+
+The workflow uses only `${{ secrets.NAME }}` references in the input step's
+`env`, so the Actions runner registers masking **before printing step headers**.
+Plain `${{ vars.NAME }}` inputs are unsafe even with restrictive local files or
+`add-mask` inside that same step: its environment header is already logged.
+Do not embed private JSON or expressions in `run`, action `with`, job names,
+outputs or summaries. Masking the full input is not permission to log extracted
+fields, parser exceptions or Terraform diagnostics.
+
+Supply compact UTF-8 JSON objects within GitHub's 48-KB per-secret limit.
+Missing, empty, whitespace-only, malformed or unqualified inputs fail closed,
+before private files are written; there is no variable fallback or dummy approval.
+If a complete receipt cannot fit, remain blocked until a separately qualified
+private-file retrieval path is reviewed; do not prune evidence or use plain vars.
+No secret values are created by this source revision. These are private control
+inputs, **not installation credentials** or a new Azure identity/key/IAM store.
+`DEMO_VM_PRIVATE_PLAN_TRANSPORT_ACCEPTED` remains a non-private environment
+**variable**, unset/false until existing transport is actually qualified.
+
+The binding secret is an object containing `upgrade`:
 
 - `vm_id`, `os_disk_id`: actual existing IDs from private readback.
 - `vm_size = "Standard_D8s_v5"`, `os_disk_sku = "Premium_LRS"` explicitly.
@@ -107,6 +133,20 @@ In the existing protected `online` environment, set
   `script_path`/`manifest_path` ending in `bootstrap-demo-vm.ps1` and
   `bootstrap-demo-vm.packages.json`, both exact 64-hex SHA256 values,
   `system_accepted = true` **only after actual acceptance**.
+
+The owner's published public producer reference is
+`martinopedal/squad-terraform-session-2026-10-14` at immutable commit
+`fa11ccfd6a3e3e12827c0c94bd1f9b4300f5e68c`. Its reported raw-byte pins are:
+
+- `scripts/bootstrap-demo-vm.ps1`:
+  `c486353e50162e5cc5d917f6d505cea7edc413daa124a9659aefcbdffd87a4ac`.
+- `scripts/bootstrap-demo-vm.packages.json` (LF-only):
+  `c95c66c53d2772e75c5ee914f047b8a75258051109f544c4aa1b5a0781aaa343`.
+
+These are public input-preparation references, not an installed private binding
+or a change to frozen consumer payload/test pins. Recheck the immutable raw URLs
+and bytes before owner qualification. Public reachability/source acceptance
+does **not** establish SYSTEM/CSE execution or allow `system_accepted = true`.
 
 `DEMO_VM_UPGRADE_QUALIFICATION_JSON` must bind `source_sha` and
 `binding_sha256` (SHA256 of the complete binding JSON serialized with sorted
@@ -152,7 +192,7 @@ An old packet cannot apply after that deadline or its earlier expiry/return.
 Planned return is privately qualified by Haflidi; the source does not
 automatically downgrade, shut down shared workloads or delete the VM.
 
-`DEMO_VM_UPGRADE_COST_RECEIPT_JSON` is a **private protected owner input**,
+`DEMO_VM_UPGRADE_COST_RECEIPT_JSON` is a **private protected environment secret**,
 written locally with restrictive permissions and sealed into the same private
 backend bundle. No collection permissions, new cost identity, public artifact,
 new plaintext secret store or fabricated cost source is introduced. Leave it
@@ -283,7 +323,9 @@ both providers mocked, no modules/external programs/provisioners/live effects.
 Tests assert emitted VM/disk/CSE/action contracts plus default compatibility and
 intended negative failures. Python mutations cover replacement, wrong targets,
 capacity, unexpected scope, wrapper mutation and budget/provenance/protection.
-The 33 Python tests include an actual Terraform 1.16.5 JSON mock-plan export
+Install the pinned offline YAML parser with
+`python -m pip install -r tests\requirements.txt` before running Python tests.
+The existing 33 Python tests include an actual Terraform 1.16.5 JSON mock-plan export
 (known nested VM body plus computed AzAPI output unknown), nested true/invalid
 marker mutations, actual rendered command length, and complete synthetic
 positive/negative tenant receipts with production qualify/seal/verify callers.
@@ -292,6 +334,14 @@ harmless local fixtures under `cmd.exe`/64-bit PowerShell 5.1 and verifies nativ
 exit codes 0, 37 and 3010. This does not install anything, use networking,
 run the SYSTEM consumer, or prove the real VM. CI runs Linux source tests and
 a credential-free Windows regression job; no provider versions are changed.
+Additional privacy tests parse the actual workflow YAML tree and mutate every
+job's loggable `run`/`with`/`env` paths, including restored plain-variable inputs,
+missing contexts and literal private JSON. Synthetic pre-masked header modeling
+is not a claim of an actual secret-bearing run. Production `prepare` and all
+file-based guard callers reject missing inputs and redact payload-derived errors;
+read-only Azure snapshot failures capture stderr rather than exposing target IDs.
+With private configuration present, Terraform validation/test diagnostics stay
+in restrictive runner-local logs and are removed by the existing cleanup steps.
 Outputs remain VM ID, Bastion name, native-RDP command and egress address.
 Static checks cannot certify Azure acceptance, quota, identities, preservation
 of every guest file, both presenters or a rehearsal. Independent source/plan

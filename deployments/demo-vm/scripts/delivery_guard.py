@@ -25,6 +25,11 @@ SEALED_FILES = {"tfplan", "baseline.json", "upgrade.auto.tfvars.json",
                 "qualification.json", "cost-receipt.json", ".terraform.lock.hcl"}
 COMMAND_PREFIX = "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand "
 AUTHORIZED_HORIZON = datetime(2026, 10, 15, 21, 59, 59, tzinfo=timezone.utc)
+PRIVATE_INPUTS = {
+    "BINDING": "upgrade.auto.tfvars.json",
+    "QUALIFICATION": "qualification.json",
+    "COST_RECEIPT": "cost-receipt.json",
+}
 
 
 def require(condition, message):
@@ -352,7 +357,7 @@ def snapshot(upgrade):
                                    ("disk", upgrade["os_disk_id"], "2024-03-02")):
         raw = subprocess.check_output(["az", "rest", "--method", "get", "--url",
                                        f"https://management.azure.com{identifier}?api-version={api}"],
-                                      text=True)
+                                      text=True, stderr=subprocess.PIPE)
         data = json.loads(raw)
         require(data["id"].lower() == identifier.lower(), "Live target ID mismatch")
         if label == "vm":
@@ -371,14 +376,24 @@ def snapshot(upgrade):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=["qualify", "plan", "snapshot", "seal", "verify"])
+    parser.add_argument("operation", choices=["prepare", "qualify", "plan", "snapshot", "seal", "verify"])
     parser.add_argument("--sha", default=os.environ.get("GITHUB_SHA"))
     args = parser.parse_args()
-    binding = json.loads(Path("upgrade.auto.tfvars.json").read_text(encoding="utf-8"))
-    evidence = json.loads(Path("qualification.json").read_text(encoding="utf-8"))
-    receipt = json.loads(Path("cost-receipt.json").read_text(encoding="utf-8"))
+    if args.operation == "prepare":
+        raw_inputs = {alias: os.environ.get(alias, "") for alias in PRIVATE_INPUTS}
+        require(all(value.strip() for value in raw_inputs.values()), "Required private secret input missing")
+        parsed = {alias: json.loads(value) for alias, value in raw_inputs.items()}
+        require(all(isinstance(value, dict) for value in parsed.values()), "Private input objects required")
+        binding, evidence, receipt = (parsed[alias] for alias in PRIVATE_INPUTS)
+    else:
+        binding = json.loads(Path("upgrade.auto.tfvars.json").read_text(encoding="utf-8"))
+        evidence = json.loads(Path("qualification.json").read_text(encoding="utf-8"))
+        receipt = json.loads(Path("cost-receipt.json").read_text(encoding="utf-8"))
     qualify(binding, evidence, args.sha, cost_receipt=receipt)
-    if args.operation == "qualify":
+    if args.operation in ("prepare", "qualify"):
+        if args.operation == "prepare":
+            for alias, filename in PRIVATE_INPUTS.items():
+                Path(filename).write_text(raw_inputs[alias], encoding="utf-8")
         print("Qualification accepted; no execution approval implied")
     elif args.operation == "plan":
         result = check_plan(json.loads(Path("tfplan.json").read_text(encoding="utf-8")), binding["upgrade"])
@@ -403,11 +418,15 @@ def main():
         print("Exact saved plan/source/baseline binding verified")
 
 
-if __name__ == "__main__":
+def cli():
     try:
         main()
-    except (ValueError, KeyError, TypeError, OSError, subprocess.CalledProcessError) as exc:
-        # Exception details from CLI/file content may contain private values.
-        message = str(exc) if isinstance(exc, ValueError) else "required private input/tool unavailable"
-        print(f"Delivery blocked: {message}", file=sys.stderr)
-        sys.exit(1)
+        return 0
+    except Exception:
+        # Even built-in ValueError/shape errors can include parsed private data.
+        print("Delivery blocked: private input/schema validation or required tool failed", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(cli())

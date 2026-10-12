@@ -69,6 +69,7 @@ jobs:
       - run: terraform init -backend=false -input=false -lockfile=readonly
       - run: terraform validate
       - run: terraform test -filter=tests/upgrade.tftest.hcl
+      - run: python3 -m pip install --disable-pip-version-check -q -r tests/requirements.txt
       - run: python3 -m unittest discover -s tests -p 'test_*.py'
       - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337
         with:
@@ -101,7 +102,8 @@ jobs:
           terraform_version: "1.16.5"
           terraform_wrapper: false
       - run: terraform init -backend=false -input=false -lockfile=readonly
-      - run: python -m unittest discover -s tests -p 'test_revision.py'
+      - run: python -m pip install --disable-pip-version-check -q -r tests/requirements.txt
+      - run: python -m unittest discover -s tests -p 'test_*.py'
 
   upgrade-policy:
     name: Verify actual Haflidi gate
@@ -138,20 +140,26 @@ jobs:
           terraform_wrapper: false
       - name: Private scope and owner qualification
         env:
-          BINDING: ${{ vars.DEMO_VM_UPGRADE_BINDING_JSON }}
-          QUALIFICATION: ${{ vars.DEMO_VM_UPGRADE_QUALIFICATION_JSON }}
-          COST_RECEIPT: ${{ vars.DEMO_VM_UPGRADE_COST_RECEIPT_JSON }}
+          BINDING: ${{ secrets.DEMO_VM_UPGRADE_BINDING_JSON }}
+          QUALIFICATION: ${{ secrets.DEMO_VM_UPGRADE_QUALIFICATION_JSON }}
+          COST_RECEIPT: ${{ secrets.DEMO_VM_UPGRADE_COST_RECEIPT_JSON }}
           PRIVATE_TRANSPORT_ACCEPTED: ${{ vars.DEMO_VM_PRIVATE_PLAN_TRANSPORT_ACCEPTED }}
         run: |
           umask 077
           [ "$PRIVATE_TRANSPORT_ACCEPTED" = true ] || { echo "::error::Existing private backend plan-prefix transport not qualified; no new IAM or keys"; exit 1; }
-          printf '%s' "$BINDING" > upgrade.auto.tfvars.json
-          printf '%s' "$QUALIFICATION" > qualification.json
-          printf '%s' "$COST_RECEIPT" > cost-receipt.json
-          python3 scripts/delivery_guard.py qualify
-      - run: terraform fmt -check -recursive
-      - run: terraform init -backend=false -input=false -lockfile=readonly && terraform validate
-      - run: terraform test -filter=tests/upgrade.tftest.hcl && python3 -m unittest discover -s tests -p 'test_*.py'
+          python3 scripts/delivery_guard.py prepare
+      - name: Validate private inputs without publishing diagnostics
+        run: |
+          umask 077
+          { terraform fmt -check -recursive &&
+            terraform init -backend=false -input=false -lockfile=readonly &&
+            terraform validate; } > validation.log 2>&1 || { echo "::error::Private Terraform validation blocked; inspect private runner evidence"; exit 1; }
+      - run: python3 -m pip install --disable-pip-version-check -q -r tests/requirements.txt
+      - name: Offline contracts with private configuration present
+        run: |
+          umask 077
+          { terraform test -filter=tests/upgrade.tftest.hcl &&
+            python3 -m unittest discover -s tests -p 'test_*.py'; } > contracts.log 2>&1 || { echo "::error::Private configuration contracts blocked; inspect private runner evidence"; exit 1; }
       - name: Azure Login (unchanged online OIDC trust)
         uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43
         with:
@@ -205,7 +213,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Remove private local delivery material
         if: always()
-        run: rm -f tfplan tfplan.json plan.log delivery.tar baseline.json upgrade.auto.tfvars.json qualification.json cost-receipt.json seal.json
+        run: rm -f tfplan tfplan.json plan.log validation.log contracts.log delivery.tar baseline.json upgrade.auto.tfvars.json qualification.json cost-receipt.json seal.json
 
   upgrade-approval:
     name: Haflidi approves exact saved plan
@@ -265,6 +273,7 @@ jobs:
           [ "$(sha256sum tfplan | cut -d' ' -f1)" = "$PLAN_SHA" ] || exit 1
       - name: Existing backend; no replacement or fresh apply plan
         run: |
+          umask 077
           terraform init -input=false -lockfile=readonly \
             -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP_ONLINE }}" \
             -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT_ONLINE }}" \
@@ -273,8 +282,9 @@ jobs:
             -backend-config="subscription_id=$ARM_SUBSCRIPTION_ID" \
             -backend-config="tenant_id=$ARM_TENANT_ID" \
             -backend-config="client_id=$ARM_CLIENT_ID" \
-            -backend-config="use_oidc=true" -backend-config="use_azuread_auth=true"
-          terraform validate
+            -backend-config="use_oidc=true" -backend-config="use_azuread_auth=true" \
+            > validation.log 2>&1 || { echo "::error::Private backend initialization blocked; inspect private runner evidence"; exit 1; }
+          terraform validate >> validation.log 2>&1 || { echo "::error::Private Terraform validation blocked; inspect private runner evidence"; exit 1; }
           python3 scripts/delivery_guard.py verify
           terraform show -json tfplan > tfplan.json
           python3 scripts/delivery_guard.py plan
@@ -286,7 +296,7 @@ jobs:
       - name: Remove private delivery material
         if: always()
         run: |
-          rm -f tfplan tfplan.json apply.log delivery.tar baseline.json upgrade.auto.tfvars.json qualification.json cost-receipt.json seal.json
+          rm -f tfplan tfplan.json apply.log validation.log delivery.tar baseline.json upgrade.auto.tfvars.json qualification.json cost-receipt.json seal.json
           az storage blob delete --auth-mode login --only-show-errors --output none \
             --account-name "${{ vars.TFSTATE_STORAGE_ACCOUNT_ONLINE }}" \
             --container-name "${{ vars.TFSTATE_CONTAINER_NAME_ONLINE }}" \
