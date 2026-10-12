@@ -220,6 +220,20 @@ class DeliveryContracts(unittest.TestCase):
         self.assertIn("prevent_destroy = true", main)
         self.assertEqual(main.count("ignore_changes"), 1)  # inherited identity exception only
 
+    def test_offline_lane_is_platform_locked_and_has_no_live_bindings(self):
+        workflow = (ROOT.parents[1] / ".github" / "workflows" / "deploy-demo-vm.yml").read_text(encoding="utf-8")
+        offline = workflow.split("  offline:", 1)[1].split("  upgrade-policy:", 1)[0]
+        for setting in ('ARM_USE_OIDC: false', 'ARM_CLIENT_ID: ""', 'ARM_TENANT_ID: ""',
+                        'ARM_SUBSCRIPTION_ID: ""', 'TF_VAR_entra_admin_object_ids: "[]"',
+                        'TF_VAR_bastion_user_object_ids: "[]"', '-lockfile=readonly'):
+            self.assertIn(setting, offline)
+        lock = (ROOT / ".terraform.lock.hcl").read_text(encoding="utf-8")
+        for package_hash in ("h1:LYUEAcDIKUaTcBRfKKdf/RCgV7sS6pb+jOPqjB7edbE=",
+                             "h1:olVprUWhmFTARlydw/r7VIx4fata2gy3zsAWfPGRrhg="):
+            self.assertIn(package_hash, lock)  # signed unchanged-pin Linux package contents
+        self.assertIn('version     = "2.13.0"', lock)
+        self.assertIn('version     = "4.81.0"', lock)
+
     def test_wrapper_has_visible_exit_hash_freshness_and_deferred_contract(self):
         template = (ROOT / "scripts" / "Invoke-MachineBootstrap.ps1.tftpl").read_text(encoding="utf-8")
         for field in ("ScriptSha256", "ManifestSha256", "VerifiedAtUtc", "RunId", "PinnedVersion",

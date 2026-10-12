@@ -49,6 +49,13 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      ARM_USE_OIDC: false
+      ARM_CLIENT_ID: ""
+      ARM_TENANT_ID: ""
+      ARM_SUBSCRIPTION_ID: ""
+      TF_VAR_entra_admin_object_ids: "[]"
+      TF_VAR_bastion_user_object_ids: "[]"
     defaults:
       run:
         working-directory: deployments/demo-vm

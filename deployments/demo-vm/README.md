@@ -161,7 +161,8 @@ execution-policy bypass. Offline tests are not SYSTEM/CSE runtime qualification.
 ## Repeatable root validation
 
 Toolchain tested: Terraform **1.16.5**, AzAPI **2.13.0**, AzureRM **4.81.0**
-(unchanged committed lock), TFLint **0.64.0** bundled rules. Configure providers
+(unchanged selected versions; committed lock includes verified
+`windows_amd64` **and** `linux_amd64` package hashes), TFLint **0.64.0** bundled rules. Configure providers
 at this root through approved `ARM_*` OIDC inputs; never commit credentials,
 actual binding JSON, state or plans. This is a root deployment, not a new module
 or backend. The existing private key remains `demo-vm.tfstate`.
@@ -186,6 +187,16 @@ Outputs remain VM ID, Bastion name, native-RDP command and egress address.
 Static checks cannot certify Azure acceptance, quota, identities, preservation
 of every guest file, both presenters or a rehearsal. Independent source/plan
 review and exact downtime approval remain required.
+
+The platform hashes were recorded with
+`terraform providers lock -platform=linux_amd64 -platform=windows_amd64`.
+This adds the Linux package-content checksums for the already selected versions;
+it does not upgrade either provider or remove existing signed archive hashes.
+Without those Linux `h1` values, readonly initialization can download a signed
+archive yet subsequent Linux validation rejects the extracted cached package.
+CI therefore keeps `-lockfile=readonly`, rather than repairing the lock at runtime.
+Offline PR checks explicitly clear Azure authentication/user-binding variables;
+provider mocks must not inherit private live-environment identifiers.
 
 Actionlint's scoped configuration lists the existing `aks-online-demo`
 self-hosted label explicitly; it does not suppress diagnostics or invent a
