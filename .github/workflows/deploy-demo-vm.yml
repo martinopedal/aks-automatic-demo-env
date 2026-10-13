@@ -1,9 +1,8 @@
 name: "Deploy Demo VM"
 
-# Clean Windows 11 VM for showing the from-zero install of GitHub Copilot
-# CLI and Squad. Same security pattern as deploy-online.yml: one job, one
-# human approval (`online` environment), OIDC, private Terraform state,
-# ephemeral VNet runner, no plan artifact.
+# Legacy clean-machine dispatch remains separate. Main merges queue a fresh
+# private saved plan, Haflidi's exact-plan gate, then the existing online gate.
+# No GitHub plan/state artifacts, new identities or new trust configuration.
 #
 # The local admin password is generated here, masked, passed as an
 # ephemeral variable, and sent once through azapi sensitive_body: it is
@@ -14,6 +13,12 @@ name: "Deploy Demo VM"
 #   scripts/start-online-runner.ps1 -Repo martinopedal/aks-automatic-demo-env
 
 on:
+  pull_request:
+    branches: [main]
+    paths: ['deployments/demo-vm/**', '.github/workflows/deploy-demo-vm.yml']
+  push:
+    branches: [main]
+    paths: ['deployments/demo-vm/**', '.github/workflows/deploy-demo-vm.yml']
   workflow_dispatch:
     inputs:
       action:
@@ -24,7 +29,6 @@ on:
         options: [plan, apply, recreate-vm, destroy]
 
 permissions:
-  id-token: write
   contents: read
 
 concurrency:
@@ -40,15 +44,282 @@ env:
   TF_VAR_bastion_user_object_ids: ${{ vars.DEMO_VM_BASTION_USERS || '[]' }}
 
 jobs:
+  offline:
+    name: Demo VM offline contracts
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ARM_USE_OIDC: false
+      ARM_CLIENT_ID: ""
+      ARM_TENANT_ID: ""
+      ARM_SUBSCRIPTION_ID: ""
+      TF_VAR_entra_admin_object_ids: "[]"
+      TF_VAR_bastion_user_object_ids: "[]"
+    defaults:
+      run:
+        working-directory: deployments/demo-vm
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: "1.16.5"
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false -input=false -lockfile=readonly
+      - run: terraform validate
+      - run: terraform test -filter=tests/upgrade.tftest.hcl
+      - run: python3 -m pip install --disable-pip-version-check -q -r tests/requirements.txt
+      - run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337
+        with:
+          tflint_version: v0.64.0
+      - run: tflint --format compact
+      - name: Qualification status (not an Azure plan)
+        run: |
+          echo '### Offline source only — no live plan or execution approval' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Total-tenant headroom, exact disk/downtime, SYSTEM payload and protected approval must qualify post-merge.' >> "$GITHUB_STEP_SUMMARY"
+
+  offline-windows:
+    name: Windows cmd and PowerShell 5.1 contracts
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      ARM_USE_OIDC: false
+      ARM_CLIENT_ID: ""
+      ARM_TENANT_ID: ""
+      ARM_SUBSCRIPTION_ID: ""
+      TF_VAR_entra_admin_object_ids: "[]"
+      TF_VAR_bastion_user_object_ids: "[]"
+    defaults:
+      run:
+        working-directory: deployments/demo-vm
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: "1.16.5"
+          terraform_wrapper: false
+      - run: terraform init -backend=false -input=false -lockfile=readonly
+      - run: python -m pip install --disable-pip-version-check -q -r tests/requirements.txt
+      - run: python -m unittest discover -s tests -p 'test_*.py'
+
+  upgrade-policy:
+    name: Verify actual Haflidi gate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Fail closed if dedicated protection is absent or permissive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 deployments/demo-vm/scripts/check_environment.py
+
+  upgrade-plan:
+    name: Fresh existing-VM saved plan
+    needs: upgrade-policy
+    runs-on: [self-hosted, aks-online-demo]
+    timeout-minutes: 45
+    environment: online
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      bundle_sha256: ${{ steps.seal.outputs.bundle_sha256 }}
+      plan_sha256: ${{ steps.seal.outputs.plan_sha256 }}
+    defaults:
+      run:
+        working-directory: deployments/demo-vm
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: "1.16.5"
+          terraform_wrapper: false
+      - name: Private scope and owner qualification
+        env:
+          BINDING: ${{ secrets.DEMO_VM_UPGRADE_BINDING_JSON }}
+          QUALIFICATION: ${{ secrets.DEMO_VM_UPGRADE_QUALIFICATION_JSON }}
+          COST_RECEIPT: ${{ secrets.DEMO_VM_UPGRADE_COST_RECEIPT_JSON }}
+          PRIVATE_TRANSPORT_ACCEPTED: ${{ vars.DEMO_VM_PRIVATE_PLAN_TRANSPORT_ACCEPTED }}
+        run: |
+          umask 077
+          [ "$PRIVATE_TRANSPORT_ACCEPTED" = true ] || { echo "::error::Existing private backend plan-prefix transport not qualified; no new IAM or keys"; exit 1; }
+          python3 scripts/delivery_guard.py prepare
+      - name: Validate private inputs without publishing diagnostics
+        run: |
+          umask 077
+          { terraform fmt -check -recursive &&
+            terraform init -backend=false -input=false -lockfile=readonly &&
+            terraform validate; } > validation.log 2>&1 || { echo "::error::Private Terraform validation blocked; inspect private runner evidence"; exit 1; }
+      - run: python3 -m pip install --disable-pip-version-check -q -r tests/requirements.txt
+      - name: Offline contracts with private configuration present
+        run: |
+          umask 077
+          { terraform test -filter=tests/upgrade.tftest.hcl &&
+            python3 -m unittest discover -s tests -p 'test_*.py'; } > contracts.log 2>&1 || { echo "::error::Private configuration contracts blocked; inspect private runner evidence"; exit 1; }
+      - name: Azure Login (unchanged online OIDC trust)
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID_ONLINE }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID_ONLINE }}
+      - name: Existing isolated backend
+        run: |
+          terraform init -reconfigure -input=false -lockfile=readonly \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP_ONLINE }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT_ONLINE }}" \
+            -backend-config="container_name=${{ vars.TFSTATE_CONTAINER_NAME_ONLINE }}" \
+            -backend-config="key=demo-vm.tfstate" \
+            -backend-config="subscription_id=$ARM_SUBSCRIPTION_ID" \
+            -backend-config="tenant_id=$ARM_TENANT_ID" \
+            -backend-config="client_id=$ARM_CLIENT_ID" \
+            -backend-config="use_oidc=true" -backend-config="use_azuread_auth=true"
+      - name: Read-only target baseline and exact incremental plan
+        run: |
+          python3 scripts/delivery_guard.py snapshot
+          set +e
+          terraform plan -input=false -out=tfplan -detailed-exitcode > plan.log 2>&1
+          ec=$?
+          set -e
+          [ "$ec" -eq 2 ] || { echo "::error::Initial upgrade requires a change plan (0=no changes, 1=error); inspect private runner evidence"; exit 1; }
+          terraform show -json tfplan > tfplan.json
+          python3 scripts/delivery_guard.py plan
+          python3 scripts/delivery_guard.py seal
+      - name: Seal into existing PRIVATE backend (never GitHub artifacts)
+        id: seal
+        run: |
+          ACCESS=$(az storage container show --auth-mode login --only-show-errors \
+            --account-name "${{ vars.TFSTATE_STORAGE_ACCOUNT_ONLINE }}" \
+            --name "${{ vars.TFSTATE_CONTAINER_NAME_ONLINE }}" --query properties.publicAccess -o tsv)
+          [ -z "$ACCESS" ] || { echo "::error::Plan container allows anonymous access; transport blocked"; exit 1; }
+          tar -cf delivery.tar tfplan baseline.json upgrade.auto.tfvars.json qualification.json cost-receipt.json seal.json
+          az storage blob upload --auth-mode login --only-show-errors --output none \
+            --account-name "${{ vars.TFSTATE_STORAGE_ACCOUNT_ONLINE }}" \
+            --container-name "${{ vars.TFSTATE_CONTAINER_NAME_ONLINE }}" \
+            --name "demo-vm-plans/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/$GITHUB_SHA/delivery.tar" \
+            --file delivery.tar --overwrite false
+          echo "bundle_sha256=$(sha256sum delivery.tar | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "plan_sha256=$(sha256sum tfplan | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          {
+            echo '### Exact saved plan awaits Haflidi and existing online approval'
+            echo "Reviewed source: $GITHUB_SHA; run: $GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT"
+            echo "Saved plan SHA256: $(sha256sum tfplan | cut -d' ' -f1)"
+            echo 'Three objects only: existing D4s_v5 to D8s_v5; SAME attached 127-GiB disk Standard_LRS to Premium_LRS, Detach; one pinned packages-only CSE.'
+            echo 'Operational IaC actions: deallocate, update, disk conversion, start, CSE; RAM/processes do not persist. No recreation/network/IAM changes.'
+            echo 'Temporary authorization ends October 15 21:59:59Z, total-tenant cap USD2500. Bound inventory/actual queries, full VM and lag reserves must qualify that horizon; historical ~USD4005 EOM remains a separate risk warning.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove private local delivery material
+        if: always()
+        run: rm -f tfplan tfplan.json plan.log validation.log contracts.log delivery.tar baseline.json upgrade.auto.tfvars.json qualification.json cost-receipt.json seal.json
+
+  upgrade-approval:
+    name: Haflidi approves exact saved plan
+    needs: upgrade-plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: demo-vm-upgrade-haflidi
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Recheck actual protection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 deployments/demo-vm/scripts/check_environment.py
+      - name: Approved plan binding (no OIDC in this job)
+        env:
+          PLAN_SHA: ${{ needs.upgrade-plan.outputs.plan_sha256 }}
+        run: |
+          [ "${#PLAN_SHA}" -eq 64 ] || exit 1
+          echo "Haflidi gate released same-run saved plan SHA256 $PLAN_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+  upgrade-apply:
+    name: Apply Haflidi-approved exact saved plan
+    needs: [upgrade-plan, upgrade-approval]
+    runs-on: [self-hosted, aks-online-demo]
+    timeout-minutes: 120
+    environment: online
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: deployments/demo-vm
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: "1.16.5"
+          terraform_wrapper: false
+      - uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID_ONLINE }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID_ONLINE }}
+      - name: Retrieve exact bundle from existing PRIVATE backend
+        env:
+          BUNDLE_SHA: ${{ needs.upgrade-plan.outputs.bundle_sha256 }}
+          PLAN_SHA: ${{ needs.upgrade-plan.outputs.plan_sha256 }}
+        run: |
+          umask 077
+          az storage blob download --auth-mode login --only-show-errors --output none \
+            --account-name "${{ vars.TFSTATE_STORAGE_ACCOUNT_ONLINE }}" \
+            --container-name "${{ vars.TFSTATE_CONTAINER_NAME_ONLINE }}" \
+            --name "demo-vm-plans/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/$GITHUB_SHA/delivery.tar" \
+            --file delivery.tar
+          [ "$(sha256sum delivery.tar | cut -d' ' -f1)" = "$BUNDLE_SHA" ] || exit 1
+          tar -xf delivery.tar tfplan baseline.json upgrade.auto.tfvars.json qualification.json cost-receipt.json seal.json
+          [ "$(sha256sum tfplan | cut -d' ' -f1)" = "$PLAN_SHA" ] || exit 1
+      - name: Existing backend; no replacement or fresh apply plan
+        run: |
+          umask 077
+          terraform init -input=false -lockfile=readonly \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP_ONLINE }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT_ONLINE }}" \
+            -backend-config="container_name=${{ vars.TFSTATE_CONTAINER_NAME_ONLINE }}" \
+            -backend-config="key=demo-vm.tfstate" \
+            -backend-config="subscription_id=$ARM_SUBSCRIPTION_ID" \
+            -backend-config="tenant_id=$ARM_TENANT_ID" \
+            -backend-config="client_id=$ARM_CLIENT_ID" \
+            -backend-config="use_oidc=true" -backend-config="use_azuread_auth=true" \
+            > validation.log 2>&1 || { echo "::error::Private backend initialization blocked; inspect private runner evidence"; exit 1; }
+          terraform validate >> validation.log 2>&1 || { echo "::error::Private Terraform validation blocked; inspect private runner evidence"; exit 1; }
+          python3 scripts/delivery_guard.py verify
+          terraform show -json tfplan > tfplan.json
+          python3 scripts/delivery_guard.py plan
+      - name: Apply ONLY that exact saved plan
+        run: |
+          # Required failures stay nonzero; never expose raw Terraform output
+          # from this public workflow. The authenticated private runner owns it.
+          terraform apply -input=false tfplan > apply.log 2>&1
+      - name: Remove private delivery material
+        if: always()
+        run: |
+          rm -f tfplan tfplan.json apply.log validation.log delivery.tar baseline.json upgrade.auto.tfvars.json qualification.json cost-receipt.json seal.json
+          az storage blob delete --auth-mode login --only-show-errors --output none \
+            --account-name "${{ vars.TFSTATE_STORAGE_ACCOUNT_ONLINE }}" \
+            --container-name "${{ vars.TFSTATE_CONTAINER_NAME_ONLINE }}" \
+            --name "demo-vm-plans/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/$GITHUB_SHA/delivery.tar"
+
   deploy:
     name: Demo VM ${{ inputs.action }}
     runs-on: [self-hosted, aks-online-demo]
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      id-token: write
+      contents: read
     timeout-minutes: 75
     environment: online
     defaults:
       run:
         working-directory: deployments/demo-vm
     steps:
+      - name: Block legacy writes in the preservation revision
+        if: inputs.action != 'plan'
+        run: |
+          echo "::error::This preservation revision requires the exact upgrade delivery path. Legacy apply/reset/destroy needs a separate reviewed source revision; the current restored disk is protected."
+          exit 1
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
@@ -108,7 +379,7 @@ jobs:
               for r in "${REPL[@]}"; do ARGS+=("-replace=$r"); done
               printf 'Replacing: %s\n' "${REPL[@]}" ;;
           esac
-          terraform plan -input=false -out=tfplan -detailed-exitcode "${ARGS[@]}"
+          terraform plan -input=false -out=tfplan -detailed-exitcode "${ARGS[@]}" > legacy-plan.log 2>&1
           ec=$?
           echo "exitcode=$ec" >> "$GITHUB_OUTPUT"
           [ "$ec" -eq 1 ] && exit 1 || exit 0
@@ -118,9 +389,8 @@ jobs:
         run: |
           {
             echo "### Demo VM plan (${{ inputs.action }})"
-            echo '```'
-            terraform show -no-color tfplan | grep -E '^\s*# |^Plan:'
-            echo '```'
+            echo 'Legacy comparison plan created privately; raw Terraform values are not published.'
+            echo 'No legacy writes permitted in this preservation revision. Use the exact upgrade lane.'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Terraform Apply
@@ -129,7 +399,7 @@ jobs:
 
       - name: Remove local plan file
         if: always()
-        run: rm -f tfplan
+        run: rm -f tfplan legacy-plan.log
 
       - name: Prove the VM is reachable only through Bastion
         if: inputs.action == 'apply' || inputs.action == 'recreate-vm'

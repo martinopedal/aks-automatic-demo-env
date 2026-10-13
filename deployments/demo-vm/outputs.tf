@@ -1,9 +1,11 @@
 output "vm_id" {
-  value = azapi_resource.vm.id
+  description = "Existing demo VM resource ID; the upgrade lane preserves this identity."
+  value       = azapi_resource.vm.id
 }
 
 output "bastion_name" {
-  value = azapi_resource.bastion.name
+  description = "Unchanged Standard Bastion host used for private native RDP."
+  value       = azapi_resource.bastion.name
 }
 
 output "connect_command" {
@@ -12,5 +14,6 @@ output "connect_command" {
 }
 
 output "egress_ip" {
-  value = azapi_resource.pip_nat.output.properties.ipAddress
+  description = "Existing NAT Gateway public egress address, not a public VM address."
+  value       = azapi_resource.pip_nat.output.properties.ipAddress
 }

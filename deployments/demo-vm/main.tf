@@ -56,7 +56,7 @@ resource "azapi_resource" "vm" {
       # Windows 11 on Azure requires attesting an eligible license.
       licenseType = "Windows_Client"
       hardwareProfile = {
-        vmSize = "Standard_D4s_v5"
+        vmSize = var.upgrade == null ? "Standard_D4s_v5" : var.upgrade.vm_size
       }
       storageProfile = {
         imageReference = {
@@ -65,12 +65,23 @@ resource "azapi_resource" "vm" {
           sku       = "win11-25h2-ent"
           version   = "latest"
         }
-        osDisk = {
+        osDisk = var.upgrade == null ? {
           name         = "osdisk-${local.name}"
           createOption = "FromImage"
           deleteOption = "Delete"
           caching      = "ReadWrite"
           managedDisk  = { storageAccountType = "StandardSSD_LRS" }
+          } : {
+          # Mirror the attached disk's immutable creation semantics, not an
+          # Attach/FromImage conversion. The separate disk PATCH owns its SKU.
+          name         = data.azapi_resource.upgrade_vm[0].output.properties.storageProfile.osDisk.name
+          createOption = data.azapi_resource.upgrade_vm[0].output.properties.storageProfile.osDisk.createOption
+          deleteOption = "Detach"
+          caching      = "ReadWrite"
+          managedDisk = {
+            id                 = var.upgrade.os_disk_id
+            storageAccountType = data.azapi_resource.upgrade_disk[0].output.sku.name
+          }
         }
       }
       osProfile = {
@@ -104,33 +115,51 @@ resource "azapi_resource" "vm" {
 
   # Write-only: merged into the create request, never stored in state.
   # The version map means it is sent once (on create), not on every apply.
-  sensitive_body = {
+  sensitive_body = var.upgrade == null ? {
     properties = {
       osProfile = {
         adminPassword = var.admin_password
       }
     }
-  }
-  sensitive_body_version = {
+  } : {}
+  sensitive_body_version = var.upgrade == null ? {
     "properties.osProfile.adminPassword" = "1"
-  }
+  } : {}
 
   response_export_values = ["properties.vmId"]
 
   lifecycle {
+    # Terraform lifecycle arguments cannot be conditional. Destructive legacy
+    # resets now require a separate reviewed source change, never this lane.
+    prevent_destroy = true
+
     # Landing-zone policies (Deploy-VM-Monitoring, Deploy-VM-ChangeTrack)
     # attach a platform user-assigned identity after creation.
     ignore_changes = [identity]
 
     precondition {
-      condition     = var.admin_password != null
+      condition     = var.upgrade != null || var.admin_password != null
       error_message = "admin_password must be supplied by the workflow (ephemeral)."
+    }
+
+    precondition {
+      condition = var.upgrade == null ? true : (
+        lower(var.upgrade.vm_id) == lower("${local.rg_id}/providers/Microsoft.Compute/virtualMachines/vm-${local.name}") &&
+        lower(data.azapi_resource.upgrade_vm[0].output.properties.storageProfile.osDisk.managedDisk.id) == lower(var.upgrade.os_disk_id) &&
+        data.azapi_resource.upgrade_vm[0].output.properties.storageProfile.osDisk.createOption == "FromImage" &&
+        data.azapi_resource.upgrade_disk[0].output.properties.diskSizeGB == 127 &&
+        lower(data.azapi_resource.upgrade_disk[0].output.managedBy) == lower(var.upgrade.vm_id)
+      )
+      error_message = "Upgrade must bind the existing VM and currently attached restored 127-GiB disk, retaining current FromImage semantics. Drift, a missing VM or a different disk blocks delivery."
     }
   }
 
   timeouts {
     create = "30m"
   }
+
+  # Deallocation must finish before the existing VM's size update.
+  depends_on = [azapi_resource_action.upgrade_deallocate]
 }
 
 resource "azapi_resource" "aad_login" {

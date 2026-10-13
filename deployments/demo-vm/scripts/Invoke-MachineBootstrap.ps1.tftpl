@@ -1,0 +1,38 @@
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+if (-not [Environment]::Is64BitProcess) { throw '64-bit LocalSYSTEM PowerShell required' }
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+if ($identity.User.Value -ne 'S-1-5-18') { throw 'CSE must run as LocalSYSTEM' }
+$started = [DateTime]::UtcNow
+$stage = Join-Path $env:ProgramData ('DemoBootstrap\delivery-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $stage -Force | Out-Null
+$script = Join-Path $stage 'bootstrap-demo-vm.ps1'
+$manifest = Join-Path $stage 'bootstrap-demo-vm.packages.json'
+$receipt = Join-Path $env:ProgramData 'DemoBootstrap\machine-bootstrap.json'
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -UseBasicParsing -Uri '${script_url}' -OutFile $script
+    Invoke-WebRequest -UseBasicParsing -Uri '${manifest_url}' -OutFile $manifest
+    if ((Get-FileHash $script -Algorithm SHA256).Hash -ne '${script_sha256}') { throw 'Bootstrap script SHA256 mismatch' }
+    if ((Get-FileHash $manifest -Algorithm SHA256).Hash -ne '${manifest_sha256}') { throw 'Bootstrap manifest SHA256 mismatch' }
+    $previousRun = if (Test-Path $receipt) { (Get-Content $receipt -Raw | ConvertFrom-Json).RunId } else { $null }
+    & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -File $script -AllUsers
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $r = Get-Content $receipt -Raw | ConvertFrom-Json
+    if ($r.SchemaVersion -ne 1 -or $r.Mode -ne 'AllUsers' -or $r.Core -ne 'pass' -or $r.Architecture -ne 'x64') { throw 'Missing machine core receipt' }
+    if ($r.RunId -notmatch '^[a-fA-F0-9]{32}$' -or $r.RunId -eq $previousRun -or [DateTime]::Parse($r.VerifiedAtUtc).ToUniversalTime() -lt $started) { throw 'Stale machine receipt' }
+    if ($r.ScriptSha256 -ne '${script_sha256}' -or $r.ManifestSha256 -ne '${manifest_sha256}') { throw 'Receipt provenance mismatch' }
+    $tools = @('pwsh','git','code','copilot','az','gh','terraform','node','npm','squad','aca')
+    if (@($r.Packages).Count -ne $tools.Count) { throw 'Incomplete tool receipt' }
+    foreach ($tool in $tools) {
+        $rows = @($r.Packages | Where-Object { $_.Tool -eq $tool })
+        if ($rows.Count -ne 1 -or $rows[0].Result -ne 'pass' -or [string]::IsNullOrWhiteSpace($rows[0].PinnedVersion)) { throw "Tool verification failed: $tool" }
+        $pin = [Regex]::Escape($rows[0].PinnedVersion)
+        if ($rows[0].Version -notmatch "(?:^|[^0-9A-Za-z])v?$pin(?:$|[^0-9A-Za-z])") { throw "Pinned version token missing: $tool" }
+        if (-not $rows[0].Path.StartsWith($env:ProgramFiles + '\', [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path $rows[0].Path -PathType Leaf)) { throw "Non-machine tool path: $tool" }
+    }
+    if ($r.Authentication -ne 'skipped; zero auth calls' -or $r.Repository -ne 'skipped; no clone/init/roster' -or $r.Reboot -ne 'not requested' -or @($r.DeferredPerUser).Count -eq 0) { throw 'Packages-only/deferred-user contract violated' }
+    'AllUsers packages verified; Desktop, VS Code user extensions and authentication deferred.'
+} finally {
+    Remove-Item -LiteralPath $stage -Recurse -Force
+}

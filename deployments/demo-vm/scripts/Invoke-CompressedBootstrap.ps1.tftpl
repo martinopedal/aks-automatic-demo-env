@@ -1,0 +1,6 @@
+$ErrorActionPreference = 'Stop'
+$r = [IO.StreamReader]::new([IO.Compression.GZipStream]::new([IO.MemoryStream]::new([Convert]::FromBase64String('${payload_gzip}')), [IO.Compression.CompressionMode]::Decompress), [Text.Encoding]::UTF8)
+try { $s = $r.ReadToEnd() } finally { $r.Dispose() }
+$global:LASTEXITCODE = 0
+& ([ScriptBlock]::Create($s))
+exit $LASTEXITCODE
