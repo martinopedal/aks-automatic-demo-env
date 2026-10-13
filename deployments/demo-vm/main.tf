@@ -56,7 +56,7 @@ resource "azapi_resource" "vm" {
       # Windows 11 on Azure requires attesting an eligible license.
       licenseType = "Windows_Client"
       hardwareProfile = {
-        vmSize = var.upgrade == null ? "Standard_D4s_v5" : var.upgrade.vm_size
+        vmSize = var.upgrade == null ? (local.legacy_creation_enabled ? "Standard_D4s_v5" : "Standard_D8s_v5") : var.upgrade.vm_size
       }
       storageProfile = {
         imageReference = {
@@ -65,7 +65,7 @@ resource "azapi_resource" "vm" {
           sku       = "win11-25h2-ent"
           version   = "latest"
         }
-        osDisk = var.upgrade == null ? {
+        osDisk = local.legacy_creation_enabled ? {
           name         = "osdisk-${local.name}"
           createOption = "FromImage"
           deleteOption = "Delete"
@@ -79,7 +79,7 @@ resource "azapi_resource" "vm" {
           deleteOption = "Detach"
           caching      = "ReadWrite"
           managedDisk = {
-            id                 = var.upgrade.os_disk_id
+            id                 = local.bound_os_disk_id
             storageAccountType = data.azapi_resource.upgrade_disk[0].output.sku.name
           }
         }
@@ -115,14 +115,14 @@ resource "azapi_resource" "vm" {
 
   # Write-only: merged into the create request, never stored in state.
   # The version map means it is sent once (on create), not on every apply.
-  sensitive_body = var.upgrade == null ? {
+  sensitive_body = local.legacy_creation_enabled ? {
     properties = {
       osProfile = {
         adminPassword = var.admin_password
       }
     }
   } : {}
-  sensitive_body_version = var.upgrade == null ? {
+  sensitive_body_version = local.legacy_creation_enabled ? {
     "properties.osProfile.adminPassword" = "1"
   } : {}
 
@@ -138,25 +138,26 @@ resource "azapi_resource" "vm" {
     ignore_changes = [identity]
 
     precondition {
-      condition     = var.upgrade != null || var.admin_password != null
+      condition     = !local.legacy_creation_enabled || var.admin_password != null
       error_message = "admin_password must be supplied by the workflow (ephemeral)."
     }
 
     precondition {
-      condition = var.upgrade == null ? true : (
-        lower(var.upgrade.vm_id) == lower("${local.rg_id}/providers/Microsoft.Compute/virtualMachines/vm-${local.name}") &&
-        lower(data.azapi_resource.upgrade_vm[0].output.properties.storageProfile.osDisk.managedDisk.id) == lower(var.upgrade.os_disk_id) &&
+      condition = !local.vm_preservation_enabled ? true : (
+        lower(local.bound_vm_id) == lower(local.existing_vm_id) &&
+        lower(data.azapi_resource.upgrade_vm[0].output.properties.storageProfile.osDisk.managedDisk.id) == lower(local.bound_os_disk_id) &&
+        lower(data.azapi_resource.upgrade_vm[0].output.properties.storageProfile.osDisk.name) == lower(basename(local.bound_os_disk_id)) &&
         data.azapi_resource.upgrade_vm[0].output.properties.storageProfile.osDisk.createOption == "FromImage" &&
-        data.azapi_resource.upgrade_vm[0].output.properties.hardwareProfile.vmSize == var.upgrade.baseline.vm_size &&
-        data.azapi_resource.upgrade_disk[0].output.sku.name == var.upgrade.baseline.os_disk_sku &&
+        data.azapi_resource.upgrade_vm[0].output.properties.hardwareProfile.vmSize == local.observed_vm_size &&
+        data.azapi_resource.upgrade_disk[0].output.sku.name == local.observed_disk_sku &&
         (local.upgrade_performance_pending ? true : (
           data.azapi_resource.upgrade_vm[0].output.properties.storageProfile.osDisk.deleteOption == "Detach" &&
           data.azapi_resource.upgrade_vm[0].output.properties.storageProfile.osDisk.caching == "ReadWrite"
         )) &&
         data.azapi_resource.upgrade_disk[0].output.properties.diskSizeGB == 127 &&
-        lower(data.azapi_resource.upgrade_disk[0].output.managedBy) == lower(var.upgrade.vm_id)
+        lower(data.azapi_resource.upgrade_disk[0].output.managedBy) == lower(local.bound_vm_id)
       )
-      error_message = "Upgrade must bind the existing VM and currently attached restored 127-GiB disk, retaining current FromImage semantics. Bound performance/retention drift, a missing VM or a different disk blocks delivery."
+      error_message = "Preservation must bind the existing VM and currently attached restored 127-GiB disk, retaining current FromImage semantics. Bound performance/retention drift, a missing VM or a different disk blocks delivery."
     }
   }
 

@@ -32,8 +32,20 @@ variable "auto_shutdown_time" {
 
 }
 
+variable "legacy_clean_machine" {
+  description = "Explicit offline compatibility opt-in for the former D4/StandardSSD clean-machine inputs. False preserves the already implemented D8/Premium VM and its current attached disk. This does not authorize legacy writes/reset."
+  type        = bool
+  default     = false
+  nullable    = false
+
+  validation {
+    condition     = !var.legacy_clean_machine || var.upgrade == null
+    error_message = "Legacy clean-machine inputs cannot be combined with a protected upgrade binding."
+  }
+}
+
 variable "upgrade" {
-  description = "Null preserves the legacy clean-machine lane. Non-null is a single reviewed in-place upgrade of the existing VM and exact attached 127-GiB disk; private environment binding, never an import or replacement."
+  description = "Null preserves the implemented D8/Premium VM and current retained disk without a bootstrap or performance action; legacy clean-machine inputs require explicit opt-in. Non-null enables only the separately approved protected delivery binding, never import/replacement."
   type = object({
     vm_id       = string
     os_disk_id  = string

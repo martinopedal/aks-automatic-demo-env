@@ -114,8 +114,9 @@ run "retains_existing_disk_and_addresses" {
 run "legacy_clean_machine_defaults" {
   command = plan
   variables {
-    upgrade        = null
-    admin_password = "OfflineTestOnly!123456"
+    upgrade              = null
+    legacy_clean_machine = true
+    admin_password       = "OfflineTestOnly!123456"
   }
   assert {
     condition = (
@@ -279,4 +280,227 @@ run "reject_unsupported_mixed_baseline" {
     upgrade = merge(var.upgrade, { baseline = { vm_size = "Standard_D8s_v5", os_disk_sku = "Standard_LRS" } })
   }
   expect_failures = [var.upgrade]
+}
+
+# Ordinary no-upgrade configuration mirrors implemented hardware; all providers remain mocked.
+run "default_preserves_manual_hardware_and_current_disk" {
+  command = plan
+
+  variables {
+    upgrade        = null
+    admin_password = null
+  }
+  override_data {
+    target = data.azapi_resource.upgrade_vm[0]
+    values = {
+      output = {
+        properties = {
+          hardwareProfile = { vmSize = "Standard_D8s_v5" }
+          storageProfile = {
+            osDisk = {
+              name         = "restored-offline-disk"
+              createOption = "FromImage"
+              caching      = "ReadWrite"
+              deleteOption = "Detach"
+              managedDisk  = { id = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Compute/disks/restored-offline-disk", storageAccountType = "Premium_LRS" }
+            }
+          }
+        }
+      }
+    }
+  }
+  override_data {
+    target = data.azapi_resource.upgrade_disk[0]
+    values = {
+      output = {
+        sku        = { name = "Premium_LRS" }
+        managedBy  = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Compute/virtualMachines/vm-demo-copilot"
+        properties = { diskSizeGB = 127 }
+      }
+    }
+  }
+
+  assert {
+    condition = (
+      !var.legacy_clean_machine &&
+      azapi_resource.vm.body.properties.hardwareProfile.vmSize == "Standard_D8s_v5" &&
+      azapi_resource.vm.body.properties.storageProfile.osDisk.managedDisk.id == data.azapi_resource.upgrade_vm[0].output.properties.storageProfile.osDisk.managedDisk.id &&
+      azapi_resource.vm.body.properties.storageProfile.osDisk.managedDisk.storageAccountType == "Premium_LRS" &&
+      azapi_resource.vm.body.properties.storageProfile.osDisk.deleteOption == "Detach" &&
+      length(azapi_resource.vm.sensitive_body_version) == 0 &&
+      length(azapi_resource.machine_bootstrap) == 0 &&
+      length(azapi_update_resource.upgrade_disk) == 0 &&
+      length(azapi_resource_action.upgrade_deallocate) == 0 &&
+      length(azapi_resource_action.upgrade_start) == 0
+    )
+    error_message = "Default must retain implemented D8/Premium/current disk, with no implicit password/performance/power/bootstrap change."
+  }
+}
+
+run "reject_default_hardware_drift" {
+  command = plan
+
+  variables {
+    upgrade        = null
+    admin_password = null
+  }
+  override_data {
+    target = data.azapi_resource.upgrade_vm[0]
+    values = {
+      output = {
+        properties = {
+          hardwareProfile = { vmSize = "Standard_D4s_v5" }
+          storageProfile = {
+            osDisk = {
+              name         = "restored-offline-disk"
+              createOption = "FromImage"
+              caching      = "ReadWrite"
+              deleteOption = "Detach"
+              managedDisk  = { id = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Compute/disks/restored-offline-disk", storageAccountType = "Premium_LRS" }
+            }
+          }
+        }
+      }
+    }
+  }
+  override_data {
+    target = data.azapi_resource.upgrade_disk[0]
+    values = {
+      output = {
+        sku        = { name = "Premium_LRS" }
+        managedBy  = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Compute/virtualMachines/vm-demo-copilot"
+        properties = { diskSizeGB = 127 }
+      }
+    }
+  }
+
+  expect_failures = [azapi_resource.vm]
+}
+
+run "reject_default_disk_capacity_drift" {
+  command = plan
+
+  variables {
+    upgrade        = null
+    admin_password = null
+  }
+  override_data {
+    target = data.azapi_resource.upgrade_vm[0]
+    values = {
+      output = {
+        properties = {
+          hardwareProfile = { vmSize = "Standard_D8s_v5" }
+          storageProfile = {
+            osDisk = {
+              name         = "restored-offline-disk"
+              createOption = "FromImage"
+              caching      = "ReadWrite"
+              deleteOption = "Detach"
+              managedDisk  = { id = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Compute/disks/restored-offline-disk", storageAccountType = "Premium_LRS" }
+            }
+          }
+        }
+      }
+    }
+  }
+  override_data {
+    target = data.azapi_resource.upgrade_disk[0]
+    values = {
+      output = {
+        sku        = { name = "Premium_LRS" }
+        managedBy  = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Compute/virtualMachines/vm-demo-copilot"
+        properties = { diskSizeGB = 128 }
+      }
+    }
+  }
+
+  expect_failures = [azapi_resource.vm]
+}
+
+run "reject_default_indirect_disk_delete" {
+  command = plan
+
+  variables {
+    upgrade        = null
+    admin_password = null
+  }
+  override_data {
+    target = data.azapi_resource.upgrade_vm[0]
+    values = {
+      output = {
+        properties = {
+          hardwareProfile = { vmSize = "Standard_D8s_v5" }
+          storageProfile = {
+            osDisk = {
+              name         = "restored-offline-disk"
+              createOption = "FromImage"
+              caching      = "ReadWrite"
+              deleteOption = "Delete"
+              managedDisk  = { id = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Compute/disks/restored-offline-disk", storageAccountType = "Premium_LRS" }
+            }
+          }
+        }
+      }
+    }
+  }
+  override_data {
+    target = data.azapi_resource.upgrade_disk[0]
+    values = {
+      output = {
+        sku        = { name = "Premium_LRS" }
+        managedBy  = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Compute/virtualMachines/vm-demo-copilot"
+        properties = { diskSizeGB = 127 }
+      }
+    }
+  }
+
+  expect_failures = [azapi_resource.vm]
+}
+
+run "reject_default_stale_disk_name" {
+  command = plan
+
+  variables {
+    upgrade        = null
+    admin_password = null
+  }
+  override_data {
+    target = data.azapi_resource.upgrade_vm[0]
+    values = {
+      output = {
+        properties = {
+          hardwareProfile = { vmSize = "Standard_D8s_v5" }
+          storageProfile = {
+            osDisk = {
+              name         = "obsolete-offline-name"
+              createOption = "FromImage"
+              caching      = "ReadWrite"
+              deleteOption = "Detach"
+              managedDisk  = { id = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Compute/disks/restored-offline-disk", storageAccountType = "Premium_LRS" }
+            }
+          }
+        }
+      }
+    }
+  }
+  override_data {
+    target = data.azapi_resource.upgrade_disk[0]
+    values = {
+      output = {
+        sku        = { name = "Premium_LRS" }
+        managedBy  = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Compute/virtualMachines/vm-demo-copilot"
+        properties = { diskSizeGB = 127 }
+      }
+    }
+  }
+
+  expect_failures = [azapi_resource.vm]
+}
+
+run "reject_legacy_opt_in_with_protected_binding" {
+  command = plan
+  variables {
+    legacy_clean_machine = true
+  }
+  expect_failures = [var.legacy_clean_machine]
 }

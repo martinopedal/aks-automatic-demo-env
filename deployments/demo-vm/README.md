@@ -7,8 +7,16 @@ state or identity was changed while preparing this source.
 ## Bounded root-module contract
 
 The existing `azapi_resource.vm` address, VM identity, private backend and
-provider pins stay unchanged. `upgrade = null` retains the legacy D4s_v5,
-from-image/StandardSSD clean-machine creation inputs and PowerShell prerequisite.
+provider pins stay unchanged. With `upgrade = null`, the ordinary default now
+reflects the manually implemented D8s_v5/Premium VM. Read-only data resolves the
+CURRENT attached 127-GiB disk ID/name; it retains FromImage/ReadWrite/Detach,
+requires matching VM ownership/current performance, and declares no new
+bootstrap, disk PATCH or power action. Missing/drifting data fails closed; no
+old disk name/ID is substituted. The former D4/StandardSSD clean-machine inputs
+remain only under explicit `legacy_clean_machine = true` offline compatibility.
+Legacy writes/reset remain blocked. The existing PowerShell prerequisite
+resource/address is unchanged; an existing managed command is not proof of all
+guest tools or bootstrap readiness.
 Non-null `upgrade` binds the **exact currently attached restored OS disk** using
 private environment inputs, not its obsolete original source name:
 
@@ -40,7 +48,7 @@ The old dispatch choices remain visible but writes/reset require a separately
 reviewed preservation/reset revision. Legacy comparison plans remain private;
 clean-machine input compatibility is preserved offline, not licensed to mutate
 this existing VM. After upgrade, keep its binding;
-switching back to null is not an approved downgrade or reset.
+switching back to null preserves current implemented hardware/disk defaults; it is not authorization to apply, downgrade, reset or remove previously managed delivery objects.
 
 ## Real approval and private plan transport
 
