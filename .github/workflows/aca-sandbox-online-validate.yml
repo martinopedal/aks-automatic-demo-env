@@ -71,7 +71,13 @@ jobs:
           PY
           aca sandbox exec --group "$ACA_SANDBOX_GROUP" --id "$ID" \
             -c "curl -s -o /dev/null -w 'probe_http=%{http_code}\n' --max-time 20 https://example.com || echo probe_blocked" | tee probe.out
-          aca sandbox egress decisions --group "$ACA_SANDBOX_GROUP" --id "$ID" | tee decisions.out
+          grep -q 'probe_http=403' probe.out
+          for i in $(seq 1 18); do
+            aca sandbox egress decisions --group "$ACA_SANDBOX_GROUP" --id "$ID" > decisions.out
+            grep -qi 'example.com' decisions.out && break
+            sleep 10
+          done
+          cat decisions.out
           grep -qi 'example.com' decisions.out
 
       - name: Delete exactly the created sandbox
