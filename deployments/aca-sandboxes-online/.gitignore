@@ -1,0 +1,5 @@
+.build/
+.private/
+__pycache__/
+*.parameters.json
+!example.parameters.json

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "resourceGroupName": {
+      "value": "rg-sandbox-example"
+    },
+    "sandboxGroupName": {
+      "value": "sbg-sandbox-example"
+    },
+    "location": {
+      "value": "swedencentral"
+    },
+    "presenterIds": {
+      "value": [
+        "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444"
+      ]
+    },
+    "consumerPrincipalId": {
+      "value": "55555555-5555-4555-8555-555555555555"
+    },
+    "assignmentNames": {
+      "value": [
+        "1af271d6-6c87-5df7-becd-5d29df819468",
+        "020b482d-5a62-574a-a34b-7114f4238006",
+        "169c7254-452e-532b-a845-69cdf2107f43"
+      ]
+    }
+  }
+}

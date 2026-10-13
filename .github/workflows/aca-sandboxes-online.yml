@@ -1,0 +1,91 @@
+{
+  "name": "ACA Sandboxes Online - source and read-only native qualification",
+  "on": {
+    "pull_request": {
+      "branches": [
+        "main"
+      ],
+      "paths": [
+        "deployments/aca-sandboxes-online/**",
+        ".github/workflows/aca-sandboxes-online.yml"
+      ]
+    },
+    "push": {
+      "branches": [
+        "main"
+      ],
+      "paths": [
+        "deployments/aca-sandboxes-online/**",
+        ".github/workflows/aca-sandboxes-online.yml"
+      ]
+    },
+    "workflow_dispatch": {}
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "concurrency": {
+    "group": "aca-sandboxes-online-${{ github.event_name }}-${{ github.ref }}",
+    "cancel-in-progress": false
+  },
+  "jobs": {
+    "source": {
+      "name": "Native source - no Azure authentication",
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 15,
+      "permissions": {
+        "contents": "read"
+      },
+      "steps": [
+        {
+          "name": "Checkout exact source",
+          "uses": "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+          "with": {
+            "persist-credentials": false
+          }
+        },
+        {
+          "name": "Pinned native compile, lint and positive/negative contracts",
+          "run": "python3 deployments/aca-sandboxes-online/source_check.py"
+        }
+      ]
+    },
+    "qualify": {
+      "name": "Protected read-only native qualify - never apply",
+      "if": "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
+      "needs": [
+        "source"
+      ],
+      "runs-on": [
+        "self-hosted",
+        "aks-online-demo"
+      ],
+      "environment": "online",
+      "timeout-minutes": 20,
+      "permissions": {
+        "contents": "read",
+        "id-token": "write"
+      },
+      "steps": [
+        {
+          "name": "Checkout same checked commit",
+          "uses": "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+          "with": {
+            "persist-credentials": false
+          }
+        },
+        {
+          "name": "Actual same-job OIDC, private full diagnostics, native validate and FullResourcePayloads what-if",
+          "env": {
+            "ACA_ONLINE_SCOPE_JSON": "${{ secrets.ACA_ONLINE_SCOPE_JSON }}",
+            "ACA_ONLINE_PARAMETERS_JSON": "${{ secrets.ACA_ONLINE_PARAMETERS_JSON }}",
+            "ACA_ONLINE_EVIDENCE_ROOT": "${{ secrets.ACA_ONLINE_EVIDENCE_ROOT }}",
+            "ACA_ONLINE_SCOPE_APPROVAL_JSON": "${{ secrets.ACA_ONLINE_SCOPE_APPROVAL_JSON }}",
+            "GITHUB_REF_PROTECTED": "${{ github.ref_protected }}"
+          },
+          "run": "python3 deployments/aca-sandboxes-online/qualify.py"
+        }
+      ]
+    }
+  }
+}

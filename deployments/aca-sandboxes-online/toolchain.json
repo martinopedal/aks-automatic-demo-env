@@ -1,0 +1,8 @@
+{
+  "bicep": "0.47.16",
+  "rgAvm": "0.4.4",
+  "rgApi": "2025-04-01",
+  "sandboxApi": "2026-07-01",
+  "rgTemplateSha256": "69eae5e5af883a0115aa68be4d0034bc5028ef43fa011fc3fb4e6fe00f18039b",
+  "linuxX64Sha256": "64c345a58e0c3e48b1bc98a4e62d6b3adb1d238281297de3400aeafb2697aa5a"
+}

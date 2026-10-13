@@ -1,0 +1,3 @@
+{
+  "analyzers": { "core": { "enabled": true, "verbose": true } }
+}
