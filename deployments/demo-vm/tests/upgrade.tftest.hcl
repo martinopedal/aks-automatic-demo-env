@@ -176,3 +176,107 @@ run "reject_mutable_payload" {
   }
   expect_failures = [var.upgrade]
 }
+
+# Synthetic current D8/Premium readback; providers remain mocked and plan-only.
+run "bootstrap_only_retained_d8_premium" {
+  command = plan
+
+  variables {
+    upgrade = merge(var.upgrade, { baseline = { vm_size = "Standard_D8s_v5", os_disk_sku = "Premium_LRS" } })
+  }
+  override_data {
+    target = data.azapi_resource.upgrade_vm[0]
+    values = {
+      output = {
+        properties = {
+          hardwareProfile = { vmSize = "Standard_D8s_v5" }
+          storageProfile = {
+            osDisk = {
+              name         = "restored-offline-disk"
+              createOption = "FromImage"
+              caching      = "ReadWrite"
+              deleteOption = "Detach"
+              managedDisk  = { id = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Compute/disks/restored-offline-disk", storageAccountType = "Premium_LRS" }
+            }
+          }
+        }
+      }
+    }
+  }
+  override_data {
+    target = data.azapi_resource.upgrade_disk[0]
+    values = {
+      output = {
+        sku        = { name = "Premium_LRS" }
+        managedBy  = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Compute/virtualMachines/vm-demo-copilot"
+        properties = { diskSizeGB = 127 }
+      }
+    }
+  }
+
+  override_resource {
+    target          = azapi_resource.nic
+    override_during = plan
+    values          = { id = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Network/networkInterfaces/nic-demo-copilot" }
+  }
+  assert {
+    condition = (
+      azapi_resource.vm.body.properties.hardwareProfile.vmSize == "Standard_D8s_v5" &&
+      azapi_resource.vm.body.properties.storageProfile.osDisk.managedDisk.id == var.upgrade.os_disk_id &&
+      azapi_resource.vm.body.properties.storageProfile.osDisk.managedDisk.storageAccountType == "Premium_LRS" &&
+      azapi_resource.vm.body.properties.storageProfile.osDisk.deleteOption == "Detach" &&
+      length(azapi_resource_action.upgrade_deallocate) == 0 &&
+      length(azapi_resource_action.upgrade_start) == 0 &&
+      length(azapi_update_resource.upgrade_disk) == 0 &&
+      length(azapi_resource.machine_bootstrap) == 1
+    )
+    error_message = "Continuation must retain the exact Premium disk and VM without performance/power/disk operations; only bootstrap remains."
+  }
+}
+
+run "reject_continuation_indirect_disk_delete" {
+  command = plan
+
+  variables {
+    upgrade = merge(var.upgrade, { baseline = { vm_size = "Standard_D8s_v5", os_disk_sku = "Premium_LRS" } })
+  }
+  override_data {
+    target = data.azapi_resource.upgrade_vm[0]
+    values = {
+      output = {
+        properties = {
+          hardwareProfile = { vmSize = "Standard_D8s_v5" }
+          storageProfile = {
+            osDisk = {
+              name         = "restored-offline-disk"
+              createOption = "FromImage"
+              caching      = "ReadWrite"
+              deleteOption = "Delete"
+              managedDisk  = { id = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Compute/disks/restored-offline-disk", storageAccountType = "Premium_LRS" }
+            }
+          }
+        }
+      }
+    }
+  }
+  override_data {
+    target = data.azapi_resource.upgrade_disk[0]
+    values = {
+      output = {
+        sku        = { name = "Premium_LRS" }
+        managedBy  = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-demo-vm-online/providers/Microsoft.Compute/virtualMachines/vm-demo-copilot"
+        properties = { diskSizeGB = 127 }
+      }
+    }
+  }
+
+  expect_failures = [azapi_resource.vm]
+}
+
+run "reject_unsupported_mixed_baseline" {
+  command = plan
+  variables {
+    upgrade = merge(var.upgrade, { baseline = { vm_size = "Standard_D8s_v5", os_disk_sku = "Standard_LRS" } })
+  }
+  expect_failures = [var.upgrade]
+}

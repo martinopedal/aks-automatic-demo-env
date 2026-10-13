@@ -22,17 +22,17 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "upgrade (protected main delivery) | plan | apply | recreate-vm (reset to a clean machine) | destroy"
+        description: "qualify-transport (isolated probe) | upgrade (protected main delivery) | plan | apply | recreate-vm (reset to a clean machine) | destroy"
         required: true
         default: plan
         type: choice
-        options: [plan, upgrade, apply, recreate-vm, destroy]
+        options: [plan, upgrade, qualify-transport, apply, recreate-vm, destroy]
 
 permissions:
   contents: read
 
 concurrency:
-  group: deploy-demo-vm
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.action == 'qualify-transport' && 'demo-vm-transport-qualification' || 'deploy-demo-vm' }}
   cancel-in-progress: false
 
 env:
@@ -104,6 +104,41 @@ jobs:
       - run: terraform init -backend=false -input=false -lockfile=readonly
       - run: python -m pip install --disable-pip-version-check -q -r tests/requirements.txt
       - run: python -m unittest discover -s tests -p 'test_*.py'
+
+  transport-qualification:
+    name: Qualify existing private plan transport only
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.action == 'qualify-transport'
+    runs-on: [self-hosted, aks-online-demo]
+    timeout-minutes: 10
+    environment: online
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: deployments/demo-vm
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Verify unchanged independent protection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check_environment.py
+      - name: Existing online OIDC only
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID_ONLINE }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID_ONLINE }}
+      - name: Isolated synthetic create-read-conditional-delete proof
+        env:
+          BACKEND_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT_ONLINE }}
+          BACKEND_CONTAINER: ${{ vars.TFSTATE_CONTAINER_NAME_ONLINE }}
+          TRANSPORT_ACTION: ${{ inputs.action }}
+        run: |
+          set -euo pipefail
+          AZ_PYTHON="$(az --version | python3 -c 'import re, sys; m = re.search(r"Python location [\x27]([^\x27]+)[\x27]", sys.stdin.read()); assert m, "Existing Azure CLI Python unavailable"; print(m.group(1))')"
+          test -x "$AZ_PYTHON"
+          "$AZ_PYTHON" -IB scripts/delivery_guard.py transport
 
   upgrade-policy:
     name: Verify actual Haflidi gate
@@ -207,8 +242,7 @@ jobs:
             echo '### Exact saved plan awaits Haflidi and existing online approval'
             echo "Reviewed source: $GITHUB_SHA; run: $GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT"
             echo "Saved plan SHA256: $(sha256sum tfplan | cut -d' ' -f1)"
-            echo 'Three objects only: existing D4s_v5 to D8s_v5; SAME attached 127-GiB disk Standard_LRS to Premium_LRS, Detach; one pinned packages-only CSE.'
-            echo 'Operational IaC actions: deallocate, update, disk conversion, start, CSE; RAM/processes do not persist. No recreation/network/IAM changes.'
+            python3 scripts/delivery_guard.py summary
             echo 'Temporary authorization ends October 15 21:59:59Z, total-tenant cap USD2500. Bound inventory/actual queries, full VM and lag reserves must qualify that horizon; historical ~USD4005 EOM remains a separate risk warning.'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Remove private local delivery material
@@ -305,7 +339,7 @@ jobs:
   deploy:
     name: Demo VM ${{ inputs.action }}
     runs-on: [self-hosted, aks-online-demo]
-    if: github.event_name == 'workflow_dispatch' && inputs.action != 'upgrade'
+    if: github.event_name == 'workflow_dispatch' && inputs.action != 'upgrade' && inputs.action != 'qualify-transport'
     permissions:
       id-token: write
       contents: read

@@ -103,6 +103,39 @@ existing retention policy; no new storage lifecycle resource is introduced.
 Raw private plan/apply files are local only and removed; no failure is turned
 into success. A fresh plan and fresh approvals are required after drift/expiry.
 
+## Explicit already-upgraded continuation and transport-only qualification
+
+Bind `upgrade.baseline` explicitly to `vm_size = "Standard_D8s_v5"` and
+`os_disk_sku = "Premium_LRS"` only after current readback of the SAME VM and
+attached retained 127-GiB disk. This continuation permits exactly one pinned
+bootstrap CSE delta. The VM must be a known no-op with unchanged body/identity,
+`FromImage`, `ReadWrite`, `Detach`, and that same Premium disk ID/name.
+No VM resize, disk PATCH, deallocate/start, downgrade, replacement, capacity
+change or attachment swap is allowed. The default D4/Standard baseline keeps
+the existing original upgrade path; only these two exact baseline pairs are
+supported. Private baseline binding is covered by the owner/cost/source hash.
+Both modes retain real owner, SYSTEM, licensing, cost and Haflidi exact-plan
+requirements. Live whole-resource hashes are rechecked before saved-plan apply.
+
+`action=qualify-transport` on reviewed **main** is separate from both legacy
+and upgrade delivery. It uses the unchanged protected `online` environment,
+existing online OIDC application and existing ephemeral Linux ACA runner.
+It never runs Terraform or VM commands and does not need/set the transport
+acceptance flag or owner-input secrets. It creates only a unique non-secret
+in-memory probe at `demo-vm-plans/<run>/<attempt>/<source>/transport-check-<nonce>.txt`,
+with create-if-absent, exact-object read/hash and ETag-conditional own-object
+delete/absence checks. It never reads state, plans, keys or other blobs.
+Any access/hash/cleanup failure is nonzero; a sanitized receipt reports the
+actual outcome. Unknown write outcomes are not blindly retried or deleted.
+
+A separate concurrency group serializes only these non-VM diagnostic probes;
+legacy/upgrade VM delivery still shares its original exclusion group. Do not
+approve a competing queued delivery for the same runner. Starting a probe still
+requires specific human approval, fresh total-tenant budget and live existing-job
+checks, one authorized runner execution, and accepted source. A successful
+receipt is evidence for an owner decision, not automatic flag publication,
+owner/SYSTEM acceptance or permission to apply. Missing acceptance remains held.
+
 ## Private input preparation (owner, not a public var file)
 
 In the existing protected `online` environment, the authorized owner must set
@@ -136,6 +169,8 @@ The binding secret is an object containing `upgrade`:
 
 - `vm_id`, `os_disk_id`: actual existing IDs from private readback.
 - `vm_size = "Standard_D8s_v5"`, `os_disk_sku = "Premium_LRS"` explicitly.
+- `baseline`: exact observed `vm_size` and `os_disk_sku`; explicit D8/Premium
+  for continuation, or default D4/Standard for the original upgrade.
 - `bootstrap`: `repository`, full 40-hex published `commit`, sibling
   `script_path`/`manifest_path` ending in `bootstrap-demo-vm.ps1` and
   `bootstrap-demo-vm.packages.json`, both exact 64-hex SHA256 values,

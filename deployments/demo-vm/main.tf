@@ -147,10 +147,16 @@ resource "azapi_resource" "vm" {
         lower(var.upgrade.vm_id) == lower("${local.rg_id}/providers/Microsoft.Compute/virtualMachines/vm-${local.name}") &&
         lower(data.azapi_resource.upgrade_vm[0].output.properties.storageProfile.osDisk.managedDisk.id) == lower(var.upgrade.os_disk_id) &&
         data.azapi_resource.upgrade_vm[0].output.properties.storageProfile.osDisk.createOption == "FromImage" &&
+        data.azapi_resource.upgrade_vm[0].output.properties.hardwareProfile.vmSize == var.upgrade.baseline.vm_size &&
+        data.azapi_resource.upgrade_disk[0].output.sku.name == var.upgrade.baseline.os_disk_sku &&
+        (local.upgrade_performance_pending ? true : (
+          data.azapi_resource.upgrade_vm[0].output.properties.storageProfile.osDisk.deleteOption == "Detach" &&
+          data.azapi_resource.upgrade_vm[0].output.properties.storageProfile.osDisk.caching == "ReadWrite"
+        )) &&
         data.azapi_resource.upgrade_disk[0].output.properties.diskSizeGB == 127 &&
         lower(data.azapi_resource.upgrade_disk[0].output.managedBy) == lower(var.upgrade.vm_id)
       )
-      error_message = "Upgrade must bind the existing VM and currently attached restored 127-GiB disk, retaining current FromImage semantics. Drift, a missing VM or a different disk blocks delivery."
+      error_message = "Upgrade must bind the existing VM and currently attached restored 127-GiB disk, retaining current FromImage semantics. Bound performance/retention drift, a missing VM or a different disk blocks delivery."
     }
   }
 

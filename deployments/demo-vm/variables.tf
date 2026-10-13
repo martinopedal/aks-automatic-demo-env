@@ -39,6 +39,10 @@ variable "upgrade" {
     os_disk_id  = string
     vm_size     = optional(string, "Standard_D8s_v5")
     os_disk_sku = optional(string, "Premium_LRS")
+    baseline = optional(object({
+      vm_size     = string
+      os_disk_sku = string
+    }), { vm_size = "Standard_D4s_v5", os_disk_sku = "Standard_LRS" })
     bootstrap = object({
       repository      = string
       commit          = string
@@ -55,10 +59,11 @@ variable "upgrade" {
     condition = var.upgrade == null ? true : (
       var.upgrade.vm_size == "Standard_D8s_v5" &&
       var.upgrade.os_disk_sku == "Premium_LRS" &&
+      contains(["Standard_D4s_v5/Standard_LRS", "Standard_D8s_v5/Premium_LRS"], "${var.upgrade.baseline.vm_size}/${var.upgrade.baseline.os_disk_sku}") &&
       can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft.Compute/virtualMachines/vm-demo-copilot$", var.upgrade.vm_id)) &&
       can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft.Compute/disks/[^/]+$", var.upgrade.os_disk_id))
     )
-    error_message = "Upgrade supports only the existing vm-demo-copilot, exact managed OS disk, D8s_v5 and Premium_LRS; no replacement or capacity change."
+    error_message = "Upgrade supports only the same VM and 127-GiB disk: bound D4/Standard performance upgrade or retained D8/Premium bootstrap continuation; no replacement, downgrade or capacity change."
   }
 
   validation {
