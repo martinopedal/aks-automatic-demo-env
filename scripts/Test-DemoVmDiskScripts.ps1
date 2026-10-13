@@ -44,6 +44,10 @@ function Reset-Fixture {
     $global:DemoVmDiskTest.creatingPolls = 0
     $global:DemoVmDiskTest.premium = 'True'
     $global:DemoVmDiskTest.dropSecurity = $false
+    $global:DemoVmDiskTest.shutdownPolls = 0
+    $global:DemoVmDiskTest.deallocationPolls = 0
+    $global:DemoVmDiskTest.powerPollsRemaining = 0
+    $global:DemoVmDiskTest.pendingPowerState = ''
     $global:DemoVmDiskTest.vm = @{
         id = $vmId; vmId = 'instance-1'; name = 'vm-demo-copilot'; location = 'swedencentral'; provisioningState = 'Succeeded'
         storageProfile = @{ osDisk = @{ name = 'original'; managedDisk = @{ id = $originalId }; createOption = 'FromImage' } }
@@ -101,9 +105,32 @@ function az {
             if ($global:DemoVmDiskTest.vmReads -eq $global:DemoVmDiskTest.concurrentAt) { $global:DemoVmDiskTest.vm['storageProfile']['osDisk']['managedDisk']['id'] = "$groupId/providers/Microsoft.Compute/disks/concurrent" }
             $result = $global:DemoVmDiskTest.vm
         }
-        'vm get-instance-view' { $result = @(@{ code = 'ProvisioningState/succeeded' }, @{ code = $global:DemoVmDiskTest.power }) }
-        'vm stop' { $global:DemoVmDiskTest.power = 'PowerState/stopped' }
-        'vm deallocate' { $global:DemoVmDiskTest.power = 'PowerState/deallocated' }
+        'vm get-instance-view' {
+            if ($global:DemoVmDiskTest.pendingPowerState) {
+                if ($global:DemoVmDiskTest.powerPollsRemaining -gt 0) {
+                    $global:DemoVmDiskTest.powerPollsRemaining--
+                } else {
+                    $global:DemoVmDiskTest.power = $global:DemoVmDiskTest.pendingPowerState
+                    $global:DemoVmDiskTest.pendingPowerState = ''
+                }
+            }
+            $result = @(@{ code = 'ProvisioningState/succeeded' }, @{ code = $global:DemoVmDiskTest.power })
+        }
+        'vm stop' {
+            if ($global:DemoVmDiskTest.shutdownPolls -gt 0) {
+                $global:DemoVmDiskTest.power = 'PowerState/stopping'
+                $global:DemoVmDiskTest.pendingPowerState = 'PowerState/stopped'
+                $global:DemoVmDiskTest.powerPollsRemaining = $global:DemoVmDiskTest.shutdownPolls
+            } else { $global:DemoVmDiskTest.power = 'PowerState/stopped' }
+        }
+        'vm deallocate' {
+            Assert-True ($global:DemoVmDiskTest.power -eq 'PowerState/stopped') 'Deallocation preceded successful normal shutdown.'
+            if ($global:DemoVmDiskTest.deallocationPolls -gt 0) {
+                $global:DemoVmDiskTest.power = 'PowerState/deallocating'
+                $global:DemoVmDiskTest.pendingPowerState = 'PowerState/deallocated'
+                $global:DemoVmDiskTest.powerPollsRemaining = $global:DemoVmDiskTest.deallocationPolls
+            } else { $global:DemoVmDiskTest.power = 'PowerState/deallocated' }
+        }
         'vm list-skus' { $result = @(@{ name = 'Standard_D4s_v5'; resourceType = 'virtualMachines'; capabilities = @(@{ name = 'PremiumIO'; value = $global:DemoVmDiskTest.premium }) }) }
         'lock list' { $result = $global:DemoVmDiskTest.locks }
         'rest --method' { $result = @{ value = @(@{ actions = @('*'); notActions = @() }) } }
@@ -231,6 +258,60 @@ $tests = [ordered]@{
         $global:DemoVmDiskTest.power = 'PowerState/deallocated'
         $null = & "$PSScriptRoot\Snapshot-DemoVm.ps1" -Subscription $subscription -SnapshotName saved -Confirm:$false
         Assert-True ((Get-Mutations).Count -eq 1) 'Deallocated VM was unnecessarily changed.'
+    }
+    'Snapshot and restore use thirty-minute waits through slow power transitions' = {
+        foreach ($script in @('Snapshot-DemoVm.ps1', 'Restore-DemoVm.ps1')) {
+            Reset-Fixture
+            $global:DemoVmDiskTest.shutdownPolls = 121
+            $global:DemoVmDiskTest.deallocationPolls = 121
+            $parameters = @{ Subscription = $subscription; Confirm = $false }
+            if ($script -eq 'Snapshot-DemoVm.ps1') { $parameters.SnapshotName = 'saved' }
+            else { $parameters.SnapshotName = 'baseline'; $parameters.DiskName = 'restored' }
+            $output = @(& "$PSScriptRoot\$script" @parameters 6>&1)
+            $messages = $output | Out-String
+            Assert-True ($messages -match 'stopping \| elapsed .+ \| timeout 1800s' -and
+                $messages -match 'deallocating \| elapsed .+ \| timeout 1800s') 'Power transitions did not use the thirty-minute default.'
+            Assert-True ($global:DemoVmDiskTest.polls -eq 242) 'The operation did not wait through all delayed power-state polls.'
+            $result = @($output | Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] })[-1]
+            Assert-True ($result.PowerState -eq 'PowerState/deallocated') 'Delayed operation did not finish deallocated.'
+        }
+    }
+    'Both scripts honor a custom power-state wait and reject invalid limits' = {
+        foreach ($script in @('Snapshot-DemoVm.ps1', 'Restore-DemoVm.ps1')) {
+            Reset-Fixture
+            $global:DemoVmDiskTest.shutdownPolls = 1
+            $global:DemoVmDiskTest.deallocationPolls = 1
+            $parameters = @{ Subscription = $subscription; Confirm = $false; PowerStateTimeoutSeconds = 3600 }
+            if ($script -eq 'Snapshot-DemoVm.ps1') { $parameters.SnapshotName = 'saved' }
+            else { $parameters.SnapshotName = 'baseline'; $parameters.DiskName = 'restored' }
+            $messages = & "$PSScriptRoot\$script" @parameters 6>&1 | Out-String
+            Assert-True ($messages -match 'stopping \| elapsed .+ \| timeout 3600s' -and
+                $messages -match 'deallocating \| elapsed .+ \| timeout 3600s') 'The custom timeout did not reach every power-state wait.'
+            Reset-Fixture
+            foreach ($invalid in @(0, -1, 86401)) {
+                $parameters.PowerStateTimeoutSeconds = $invalid
+                Assert-Throws { & "$PSScriptRoot\$script" @parameters } 'PowerStateTimeoutSeconds'
+            }
+            Assert-True ((Get-Mutations).Count -eq 0) 'Invalid limits mutated Azure.'
+        }
+    }
+    'A stuck shutdown still fails safely without deallocation or capture' = {
+        $context = Get-DemoDiskContext $subscription 'rg-demo-vm-online' 'vm-demo-copilot'
+        $context.PowerStateTimeoutSeconds = 0
+        $global:DemoVmDiskTest.shutdownPolls = 10
+        Assert-Throws { Stop-DemoVmCleanly $context } 'Timed out after 0s.+PowerState/stopping.+inspect the VM before retrying'
+        $operations = @((Get-Mutations) | ForEach-Object { $_[0..1] -join ' ' })
+        Assert-True (($operations -join ',') -eq 'vm stop') 'A timed-out shutdown continued to deallocate or create resources.'
+    }
+    'Transitional-state preflight uses the configured power wait without writes' = {
+        $global:DemoVmDiskTest.power = 'PowerState/stopping'
+        $global:DemoVmDiskTest.pendingPowerState = 'PowerState/stopped'
+        $global:DemoVmDiskTest.powerPollsRemaining = 2
+        $messages = & {
+            $null = Get-DemoDiskContext $subscription 'rg-demo-vm-online' 'vm-demo-copilot' -PowerStateTimeoutSeconds 3600
+        } 6>&1 | Out-String
+        Assert-True ($messages -match 'stopping \| elapsed .+ \| timeout 3600s') 'Preflight ignored the configured power-state wait.'
+        Assert-True ((Get-Mutations).Count -eq 0) 'Waiting for an existing shutdown performed a write.'
     }
     'Snapshot creation polls and timeout is explicit' = {
         $global:DemoVmDiskTest.creatingPolls = 1

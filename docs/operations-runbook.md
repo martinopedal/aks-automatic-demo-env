@@ -144,6 +144,10 @@ Restore then deallocates, rechecks the VM and disk, tags the previous disk for f
 
 Both scripts print timestamped phases by default: preflight, preparation, creation, waiting, verification, and completion. Restore also shows retention and swap phases. Waiting shows the current Azure state and elapsed time, with periodic text updates and a progress indicator. The timeout is a limit on waiting, not an estimated completion time or a fabricated percentage.
 
+Each VM power-state wait allows **30 minutes** by default, including normal Windows shutdown, deallocation, and waiting for an existing transition during preflight. Windows shutdown can exceed five minutes. Use `-PowerStateTimeoutSeconds` on either script to change this limit (60-86400 seconds); for example, `-PowerStateTimeoutSeconds 3600` allows one hour per power-state wait. Disk/snapshot provisioning retains its separate 10-minute wait limit.
+
+If a power-state wait expires, the script stops safely without forcing power-off or proceeding to capture/swap. The Azure operation can still finish after the script exits. Inspect the VM before retrying. If restore already created a compatible unattached replacement disk, select that **Disk** in the picker or pass its ID with `-OsDiskId`; do not select the snapshot again unless you want another disk created.
+
 Add `-Verbose` to see individual Azure CLI operation timings, full resource IDs, and source lineage:
 
 ```powershell

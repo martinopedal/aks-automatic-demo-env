@@ -92,7 +92,7 @@ function Get-DemoPowerState {
 }
 
 function Wait-DemoPowerState {
-    param($Context, [string[]]$AllowedStates, [int]$TimeoutSeconds = 300)
+    param($Context, [string[]]$AllowedStates, [int]$TimeoutSeconds = $Context.PowerStateTimeoutSeconds)
     $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
     $timer = [Diagnostics.Stopwatch]::StartNew()
     $lastState = ''
@@ -116,7 +116,7 @@ function Wait-DemoPowerState {
             }
             Start-Sleep -Seconds 5
         } while ([datetime]::UtcNow -lt $deadline)
-        throw "Timed out waiting for VM power state. Last state: $state."
+        throw "Timed out after ${TimeoutSeconds}s waiting for VM power state. Last state: $state. Azure may still be completing the requested operation; inspect the VM before retrying. No force power-off was requested."
     } finally {
         Write-Progress -Id 41 -Activity $activity -Completed
     }
@@ -256,7 +256,10 @@ function Assert-DemoUnchanged {
 }
 
 function Get-DemoDiskContext {
-    param([string]$Subscription, [string]$ResourceGroup, [string]$VmName)
+    param(
+        [string]$Subscription, [string]$ResourceGroup, [string]$VmName,
+        [ValidateRange(60, 86400)][int]$PowerStateTimeoutSeconds = 1800
+    )
     if (-not $Subscription) { throw 'Set -Subscription or $env:AZURE_SUBSCRIPTION_ID_ONLINE.' }
     if (-not (Get-Command az -ErrorAction SilentlyContinue)) { throw 'Azure CLI is required. Install it and run az login.' }
     Write-DemoStatus 'Preflight' 'Checking Azure login and subscription...'
@@ -266,6 +269,7 @@ function Get-DemoDiskContext {
         Subscription = $account['id']
         ResourceGroup = $ResourceGroup
         VmName = $VmName
+        PowerStateTimeoutSeconds = $PowerStateTimeoutSeconds
     }
     Write-DemoStatus 'Preflight' "Reading resource group '$ResourceGroup'..."
     $context.Group = Invoke-DemoAzure -Subscription $context.Subscription -Arguments @('group', 'show', '-n', $ResourceGroup)

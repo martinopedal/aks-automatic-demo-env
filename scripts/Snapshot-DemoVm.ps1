@@ -8,6 +8,10 @@
     deallocated. Requires Azure CLI login and VM/disk/snapshot write access.
     Prints phase/status messages and elapsed time. Add -Verbose for CLI
     timings and full resource IDs.
+.PARAMETER PowerStateTimeoutSeconds
+    Limit for each VM power-state wait, including shutdown and deallocation.
+    Defaults to 1800 seconds (30 minutes). Accepts 60-86400 seconds.
+    A timeout stops the script without forcing power-off.
 .EXAMPLE
     .\scripts\Snapshot-DemoVm.ps1 -Subscription <subscription-id> -WhatIf
 .EXAMPLE
@@ -18,14 +22,15 @@ param(
     [string]$Subscription = $env:AZURE_SUBSCRIPTION_ID_ONLINE,
     [string]$ResourceGroup = 'rg-demo-vm-online',
     [string]$VmName = 'vm-demo-copilot',
-    [string]$SnapshotName
+    [string]$SnapshotName,
+    [ValidateRange(60, 86400)][int]$PowerStateTimeoutSeconds = 1800
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'DemoVmDisk.Common.ps1')
 $operationTimer = [Diagnostics.Stopwatch]::StartNew()
 Write-DemoStatus 'Snapshot' "Preparing an OS-disk snapshot for '$VmName'..."
 
-$context = Get-DemoDiskContext $Subscription $ResourceGroup $VmName
+$context = Get-DemoDiskContext $Subscription $ResourceGroup $VmName $PowerStateTimeoutSeconds
 if (-not $SnapshotName) { $SnapshotName = New-DemoDiskName 'snap-osdisk' $VmName }
 Assert-DemoNameAvailable $context 'snapshot' $SnapshotName
 $snapshotId = "$($context.Group['id'])/providers/Microsoft.Compute/snapshots/$SnapshotName"

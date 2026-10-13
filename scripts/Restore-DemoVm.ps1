@@ -11,6 +11,10 @@
     local OS-disk change is manually reconciled.
     Prints phase/status messages and elapsed time. Add -Verbose for CLI
     timings and full resource IDs.
+.PARAMETER PowerStateTimeoutSeconds
+    Limit for each VM power-state wait, including shutdown and deallocation.
+    Defaults to 1800 seconds (30 minutes). Accepts 60-86400 seconds.
+    A timeout stops the script without forcing power-off.
 .EXAMPLE
     .\scripts\Restore-DemoVm.ps1 -Subscription <subscription-id>
 .EXAMPLE
@@ -29,14 +33,15 @@ param(
     [Parameter(ParameterSetName = 'Picker')][string]$DiskName,
     [Parameter(ParameterSetName = 'Snapshot')]
     [Parameter(ParameterSetName = 'Picker')]
-    [ValidateSet('Standard_LRS', 'StandardSSD_LRS', 'Premium_LRS')][string]$DiskSku
+    [ValidateSet('Standard_LRS', 'StandardSSD_LRS', 'Premium_LRS')][string]$DiskSku,
+    [ValidateRange(60, 86400)][int]$PowerStateTimeoutSeconds = 1800
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'DemoVmDisk.Common.ps1')
 $operationTimer = [Diagnostics.Stopwatch]::StartNew()
 Write-DemoStatus 'Restore' "Preparing OS-disk restore for '$VmName'..."
 
-$context = Get-DemoDiskContext $Subscription $ResourceGroup $VmName
+$context = Get-DemoDiskContext $Subscription $ResourceGroup $VmName $PowerStateTimeoutSeconds
 if ($PSCmdlet.ParameterSetName -ne 'Disk') {
     if (-not $PSBoundParameters.ContainsKey('DiskSku')) {
         $DiskSku = $context.Disk['sku']['name']
