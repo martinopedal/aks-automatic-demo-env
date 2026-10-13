@@ -55,7 +55,7 @@ jobs:
           python3 -c "import json;g=json.load(open('group.json'));print('group',g.get('name'),g.get('location'))"
           aca sandbox create --group "$ACA_SANDBOX_GROUP" --disk ubuntu --cpu 1000m --memory 2048Mi \
             --egress-default Deny --traffic-inspection Full --label run=${{ github.run_id }} --wait-timeout 90 -o json > create.json
-          ID=$(python3 -c "import json;print(json.load(open('create.json'))['id'])")
+          ID=$(grep -Eo -m1 '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' create.json | head -n1)
           echo "$ID" | grep -Eq '^[0-9a-f-]{36}$'
           echo "sandbox_id=$ID" >> "$GITHUB_OUTPUT"
           echo "Created sandbox $ID"
