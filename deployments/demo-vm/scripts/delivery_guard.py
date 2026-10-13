@@ -8,6 +8,10 @@ import io
 import json
 import math
 import os
+import logging
+from email.utils import formatdate
+from urllib.parse import quote
+import uuid
 from pathlib import Path
 import re
 import subprocess
@@ -204,11 +208,40 @@ def check_cost_receipt(receipt, evidence, binding, sha, binding_sha, now):
             "Projection total/qualification mismatch")
 
 
+def delivery_baseline(upgrade):
+    baseline = upgrade.get("baseline", {"vm_size": "Standard_D4s_v5", "os_disk_sku": "Standard_LRS"})
+    require(isinstance(baseline, dict) and set(baseline) == {"vm_size", "os_disk_sku"},
+            "Exact approved baseline fields required")
+    require((baseline["vm_size"], baseline["os_disk_sku"]) in {
+        ("Standard_D4s_v5", "Standard_LRS"), ("Standard_D8s_v5", "Premium_LRS")
+    }, "Unsupported approved baseline; no downgrade or inferred continuation")
+    return baseline
+
+
+def is_continuation(upgrade):
+    return delivery_baseline(upgrade)["vm_size"] == "Standard_D8s_v5"
+
+
+def check_retained_vm(value, upgrade):
+    require(value.get("id", "").lower() == upgrade["vm_id"].lower(), "VM ID not bound")
+    props = value["body"]["properties"]
+    disk = props["storageProfile"]["osDisk"]
+    require(props["hardwareProfile"]["vmSize"] == "Standard_D8s_v5", "Continuation VM baseline changed")
+    require(disk["managedDisk"]["id"].lower() == upgrade["os_disk_id"].lower() and
+            disk["name"].lower() == upgrade["os_disk_id"].split("/")[-1].lower(), "Exact retained disk identity changed")
+    require(disk["createOption"] == "FromImage" and disk["deleteOption"] == "Detach" and
+            disk["caching"] == "ReadWrite" and disk["managedDisk"]["storageAccountType"] == "Premium_LRS",
+            "Retained disk semantics/SKU changed; indirect disk loss forbidden")
+    if "diskSizeGB" in disk:
+        require(disk["diskSizeGB"] == 127, "Retained disk capacity changed")
+
+
 def qualify(binding, evidence, sha, now=None, cost_receipt=None):
     now = now or datetime.now(timezone.utc)
     require(re.fullmatch(r"[0-9a-f]{40}", sha), "Full reviewed source commit required")
     require(binding.get("upgrade") is not None, "Private exact upgrade binding missing")
     upgrade = binding["upgrade"]
+    delivery_baseline(upgrade)
     require(upgrade["vm_size"] == "Standard_D8s_v5" and upgrade["os_disk_sku"] == "Premium_LRS",
             "Unsupported upgrade SKU")
     require(evidence["source_sha"] == sha, "Qualification belongs to another source revision")
@@ -250,66 +283,96 @@ def qualify(binding, evidence, sha, now=None, cost_receipt=None):
 def check_plan(plan, upgrade):
     require(plan.get("errored") is not True and plan.get("applyable") is True,
             "Plan not applyable")
+    continuation = is_continuation(upgrade)
+    allowed = {CSE} if continuation else ALLOWED
     changes = {}
+    vm_rows = []
     for row in plan["resource_changes"]:
+        if row["mode"] == "managed" and row["address"] == VM:
+            vm_rows.append(row)
         if row["mode"] == "data":
             require(row["change"]["actions"] in (["read"], ["no-op"]), "Data mutation forbidden")
             continue
         actions = row["change"]["actions"]
         if actions == ["no-op"]:
             continue
-        require(row["address"] in ALLOWED, "Change outside three-object scope")
+        require(row["address"] in allowed,
+                "Change outside bootstrap-only continuation" if continuation else "Change outside three-object scope")
         require("delete" not in actions and actions in (["create"], ["update"]),
                 "Delete/replacement forbidden, including action rearming")
         changes[row["address"]] = row["change"]
-    require(set(changes) == ALLOWED, "Initial upgrade must include VM, disk, CSE and both ordered actions")
-    vm = changes[VM]
-    require(vm["actions"] == ["update"] and vm["before"], "Existing VM only; create forbidden")
-    before, after = vm["before"], vm["after"]
-    require(after.get("id", "").lower() == upgrade["vm_id"].lower() and
-            before.get("id", "").lower() == upgrade["vm_id"].lower(), "VM ID not bound")
-    markers = vm.get("after_unknown", {})
-    require(isinstance(markers, dict), "Invalid Terraform unknown marker shape")
-    require(not unknown_leaves(markers.get("body", False)), "Unknown VM body forbidden")
-    for key in ("type", "name", "location", "parent_id", "tags", "identity"):
-        require(before.get(key) == after.get(key), "VM non-performance metadata change")
-    old = copy.deepcopy(before["body"])
-    new = copy.deepcopy(after["body"])
-    require(old["properties"]["hardwareProfile"]["vmSize"] == "Standard_D4s_v5" and
-            new["properties"]["hardwareProfile"]["vmSize"] == "Standard_D8s_v5", "Wrong VM resize")
-    old_disk = old["properties"]["storageProfile"]["osDisk"]
-    new_disk = new["properties"]["storageProfile"]["osDisk"]
-    require(new_disk["managedDisk"]["id"].lower() == upgrade["os_disk_id"].lower(),
-            "Exact retained disk ID missing")
-    require(new_disk["name"].lower() == upgrade["os_disk_id"].split("/")[-1].lower(),
-            "Restored disk name differs")
-    require(new_disk["createOption"] == old_disk["createOption"] == "FromImage" and
-            new_disk["deleteOption"] == "Detach" and new_disk["caching"] == old_disk["caching"] == "ReadWrite",
-            "Disk creation/retention/caching semantics changed")
-    require(old_disk.get("managedDisk", {}).get("id", upgrade["os_disk_id"]).lower() ==
-            upgrade["os_disk_id"].lower(), "Different current disk")
-    require(new_disk["managedDisk"]["storageAccountType"] == "Standard_LRS",
-            "VM update must preserve disk SKU until the independent disk PATCH")
-    # Only authoritatively bind/retain the restored disk and resize the VM.
-    old["properties"]["hardwareProfile"]["vmSize"] = "Standard_D8s_v5"
-    old["properties"]["storageProfile"]["osDisk"] = new_disk
-    require(old == new, "VM properties changed outside reviewed performance/retention fields")
-    disk = changes[DISK]["after"]
-    require(disk["resource_id"].lower() == upgrade["os_disk_id"].lower() and
-            disk["body"] == {"sku": {"name": "Premium_LRS"}}, "Disk PATCH not SKU-only/exact ID")
-    require(disk["type"] == "Microsoft.Compute/disks@2024-03-02" and
-            not disk.get("sensitive_body_version") and not disk.get("read_override"),
-            "Wrong disk API or hidden disk payload")
-    for address, action in ((STOP, "deallocate"), (START, "start")):
-        row = changes[address]
-        require(row["actions"] == ["create"], "Operational actions must execute in this exact plan")
-        value = row["after"]
-        require(value["resource_id"].lower() == upgrade["vm_id"].lower() and
-                value["action"] == action and value["method"] == "POST" and value["when"] == "apply",
-                "Wrong operational VM action")
-        require(not value.get("body") and not value.get("sensitive_body_version"),
-                "Unexpected operational payload")
-    cse = changes[CSE]["after"]
+    if continuation:
+        require(set(changes) == {CSE}, "Continuation requires exactly the pinned CSE change")
+        require(len(vm_rows) == 1 and vm_rows[0]["change"]["actions"] == ["no-op"],
+                "Continuation VM must be known and unchanged; replacement/update forbidden")
+        vm = vm_rows[0]["change"]
+        require(not unknown_leaves(vm.get("after_unknown", {}).get("body", False)), "Unknown VM body forbidden")
+        require(vm.get("before") and vm.get("after"), "Existing VM before/after required")
+        for key in ("id", "type", "name", "location", "parent_id", "tags"):
+            require(not unknown_leaves(vm.get("after_unknown", {}).get(key, False)), "Unknown critical VM field forbidden")
+        check_retained_vm(vm["before"], upgrade)
+        check_retained_vm(vm["after"], upgrade)
+        require(vm["before"]["body"] == vm["after"]["body"], "Continuation VM body changed")
+        for key in ("type", "name", "location", "parent_id", "tags", "identity"):
+            require(vm["before"].get(key) == vm["after"].get(key), "VM non-performance metadata change")
+    else:
+        require(set(changes) == ALLOWED, "Initial upgrade must include VM, disk, CSE and both ordered actions")
+        vm = changes[VM]
+        require(vm["actions"] == ["update"] and vm["before"], "Existing VM only; create forbidden")
+        before, after = vm["before"], vm["after"]
+        require(after.get("id", "").lower() == upgrade["vm_id"].lower() and
+                before.get("id", "").lower() == upgrade["vm_id"].lower(), "VM ID not bound")
+        markers = vm.get("after_unknown", {})
+        require(isinstance(markers, dict), "Invalid Terraform unknown marker shape")
+        require(not unknown_leaves(markers.get("body", False)), "Unknown VM body forbidden")
+        for key in ("type", "name", "location", "parent_id", "tags", "identity"):
+            require(before.get(key) == after.get(key), "VM non-performance metadata change")
+        old = copy.deepcopy(before["body"])
+        new = copy.deepcopy(after["body"])
+        require(old["properties"]["hardwareProfile"]["vmSize"] == "Standard_D4s_v5" and
+                new["properties"]["hardwareProfile"]["vmSize"] == "Standard_D8s_v5", "Wrong VM resize")
+        old_disk = old["properties"]["storageProfile"]["osDisk"]
+        new_disk = new["properties"]["storageProfile"]["osDisk"]
+        require(new_disk["managedDisk"]["id"].lower() == upgrade["os_disk_id"].lower(),
+                "Exact retained disk ID missing")
+        require(new_disk["name"].lower() == upgrade["os_disk_id"].split("/")[-1].lower(),
+                "Restored disk name differs")
+        require(new_disk["createOption"] == old_disk["createOption"] == "FromImage" and
+                new_disk["deleteOption"] == "Detach" and new_disk["caching"] == old_disk["caching"] == "ReadWrite",
+                "Disk creation/retention/caching semantics changed")
+        require(old_disk.get("managedDisk", {}).get("id", upgrade["os_disk_id"]).lower() ==
+                upgrade["os_disk_id"].lower(), "Different current disk")
+        require(new_disk["managedDisk"]["storageAccountType"] == "Standard_LRS",
+                "VM update must preserve disk SKU until the independent disk PATCH")
+        require(set(new_disk) == {"name", "createOption", "deleteOption", "caching", "managedDisk"} and
+                set(new_disk["managedDisk"]) == {"id", "storageAccountType"},
+                "Unexpected retained disk fields/capacity change forbidden")
+        # Only authoritatively bind/retain the restored disk and resize the VM.
+        old["properties"]["hardwareProfile"]["vmSize"] = "Standard_D8s_v5"
+        old["properties"]["storageProfile"]["osDisk"] = new_disk
+        require(old == new, "VM properties changed outside reviewed performance/retention fields")
+        disk = changes[DISK]["after"]
+        require(disk["resource_id"].lower() == upgrade["os_disk_id"].lower() and
+                disk["body"] == {"sku": {"name": "Premium_LRS"}}, "Disk PATCH not SKU-only/exact ID")
+        require(disk["type"] == "Microsoft.Compute/disks@2024-03-02" and
+                not disk.get("sensitive_body_version") and not disk.get("read_override"),
+                "Wrong disk API or hidden disk payload")
+        for address, action in ((STOP, "deallocate"), (START, "start")):
+            row = changes[address]
+            require(row["actions"] == ["create"], "Operational actions must execute in this exact plan")
+            value = row["after"]
+            require(value["resource_id"].lower() == upgrade["vm_id"].lower() and
+                    value["action"] == action and value["method"] == "POST" and value["when"] == "apply",
+                    "Wrong operational VM action")
+            require(not value.get("body") and not value.get("sensitive_body_version"),
+                    "Unexpected operational payload")
+    cse_change = changes[CSE]
+    require(not unknown_leaves(cse_change.get("after_unknown", {}).get("body", False)), "Unknown CSE body forbidden")
+    cse = cse_change["after"]
+    if cse_change["actions"] == ["update"]:
+        require(cse_change.get("before"), "Existing CSE before required")
+        for key in ("type", "name", "location", "parent_id", "tags", "identity"):
+            require(cse_change["before"].get(key) == cse.get(key), "CSE identity/metadata change forbidden")
     require(cse["parent_id"].lower() == upgrade["vm_id"].lower() and cse["name"] == "DemoMachineBootstrap",
             "CSE target not bound")
     require(cse["type"] == "Microsoft.Compute/virtualMachines/extensions@2024-11-01" and
@@ -348,10 +411,11 @@ def check_plan(plan, upgrade):
         expected = expected.replace("${" + name + "}", value)
     require(actual.replace("\r\n", "\n") == expected.replace("\r\n", "\n"),
             "CSE command differs from reviewed wrapper and immutable payload binding")
-    return {"objects": 3, "actions": 2, "replacement": False, "disk_capacity_change": False}
+    return {"objects": 1 if continuation else 3, "actions": 0 if continuation else 2, "replacement": False, "disk_capacity_change": False}
 
 
 def snapshot(upgrade):
+    baseline = delivery_baseline(upgrade)
     result = {}
     for label, identifier, api in (("vm", upgrade["vm_id"], "2024-11-01"),
                                    ("disk", upgrade["os_disk_id"], "2024-03-02")):
@@ -362,11 +426,13 @@ def snapshot(upgrade):
         require(data["id"].lower() == identifier.lower(), "Live target ID mismatch")
         if label == "vm":
             props = data["properties"]
-            require(props["hardwareProfile"]["vmSize"] == "Standard_D4s_v5", "Live VM baseline changed")
+            require(props["hardwareProfile"]["vmSize"] == baseline["vm_size"], "Live VM baseline changed")
             require(props["storageProfile"]["osDisk"]["managedDisk"]["id"].lower() ==
                     upgrade["os_disk_id"].lower(), "Live attached OS disk changed")
+            if is_continuation(upgrade):
+                check_retained_vm({"id": data["id"], "body": {"properties": props}}, upgrade)
         else:
-            require(data["properties"]["diskSizeGB"] == 127 and data["sku"]["name"] == "Standard_LRS" and
+            require(data["properties"]["diskSizeGB"] == 127 and data["sku"]["name"] == baseline["os_disk_sku"] and
                     data["managedBy"].lower() == upgrade["vm_id"].lower(), "Live disk baseline changed")
         # Canonical whole GET hashes detect drift, including foreign policy writes,
         # without publishing any ARM response, principal or target identifiers.
@@ -374,11 +440,120 @@ def snapshot(upgrade):
     return result
 
 
+class TransportFailure(ValueError):
+    def __init__(self, receipt):
+        super().__init__("Synthetic transport qualification failed; no acceptance flag set")
+        self.receipt = receipt
+
+
+def transport_probe(send, context, nonce=None):
+    require(context["account"] == "stonlinedemotfst01" and context["container"] == "tfstate",
+            "Only the existing private backend may be tested")
+    require(re.fullmatch(r"[a-f0-9]{40}", context["source_sha"]) and
+            re.fullmatch(r"[1-9][0-9]*", context["run_id"]) and
+            re.fullmatch(r"[1-9][0-9]*", context["run_attempt"]), "Source/run/attempt binding required")
+    require(context["identity_verified"] is True, "Existing online OIDC identity not verified")
+    nonce = nonce or uuid.uuid4().hex
+    require(re.fullmatch(r"[a-f0-9]{32}", nonce), "Synthetic probe nonce invalid")
+    name = f'demo-vm-plans/{context["run_id"]}/{context["run_attempt"]}/{context["source_sha"]}/transport-check-{nonce}.txt'
+    base = f'https://{context["account"]}.blob.core.windows.net/{context["container"]}'
+    blob = base + "/" + quote(name, safe="/")
+    payload = ("nonsecret-transport-check-v1:" + nonce).encode("ascii")
+    receipt = {"kind": "synthetic-transport-only", "source_sha": context["source_sha"],
+               "run_id": context["run_id"], "run_attempt": context["run_attempt"],
+               "blob_name": name, "payload_sha256": hashlib.sha256(payload).hexdigest(),
+               "identity_verified": True, "private_container_verified": False,
+               "write_verified": False, "read_verified": False, "delete_verified": False,
+               "success": False}
+    created, etag, failed = False, None, False
+    phase = "private-container-head"
+    try:
+        status, headers, _ = send("HEAD", base + "?restype=container", {}, None)
+        require(status == 200 and not headers.get("x-ms-blob-public-access"), "Private container HEAD failed")
+        receipt["private_container_verified"] = True
+        phase = "synthetic-create-if-absent"
+        status, headers, _ = send("PUT", blob, {"If-None-Match": "*", "x-ms-blob-type": "BlockBlob",
+                                                "Content-Type": "text/plain"}, payload)
+        require(status == 201, "Synthetic create-if-absent failed")
+        created, etag = True, headers.get("etag")
+        require(isinstance(etag, str) and etag.startswith('"') and etag.endswith('"'), "Owned probe ETag missing")
+        receipt["write_verified"] = True
+        phase = "owned-object-read-hash"
+        status, headers, body = send("GET", blob, {"If-Match": etag}, None)
+        require(status == 200 and headers.get("etag") == etag and
+                hashlib.sha256(body).hexdigest() == receipt["payload_sha256"], "Owned probe hash/ETag differs")
+        receipt["read_verified"] = True
+    except Exception:
+        failed = True
+        receipt["failed_phase"] = phase
+    finally:
+        if created and etag:
+            try:
+                status, _, _ = send("DELETE", blob, {"If-Match": etag}, None)
+                require(status == 202, "Conditional own-object cleanup failed")
+                status, _, _ = send("HEAD", blob, {}, None)
+                require(status == 404, "Own-object absence not verified")
+                receipt["delete_verified"] = True
+            except Exception:
+                failed = True
+                receipt["cleanup_failed"] = True
+    receipt["success"] = not failed and all(receipt[k] for k in (
+        "private_container_verified", "write_verified", "read_verified", "delete_verified"))
+    if not receipt["success"]:
+        raise TransportFailure(receipt)
+    return receipt
+
+
+def run_transport():
+    # The workflow invokes the already-installed Azure CLI Python, not new SDK packages.
+    logging.disable(logging.CRITICAL)
+    require(os.environ.get("GITHUB_ACTIONS") == "true" and
+            os.environ.get("GITHUB_REPOSITORY") == "martinopedal/aks-automatic-demo-env" and
+            os.environ.get("GITHUB_REF") == "refs/heads/main" and
+            os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch" and
+            os.environ.get("GITHUB_JOB") == "transport-qualification" and
+            os.environ.get("TRANSPORT_ACTION") == "qualify-transport", "Protected main-only probe context required")
+    from azure.cli.core._profile import Profile
+    from azure.core.pipeline import Pipeline
+    from azure.core.pipeline.policies import BearerTokenCredentialPolicy
+    from azure.core.pipeline.transport import HttpRequest, RequestsTransport
+    profile = Profile()
+    credential, subscription, tenant = profile.get_login_credentials(subscription_id=os.environ["ARM_SUBSCRIPTION_ID"])
+    account = profile.get_subscription(subscription_id=subscription)
+    require(subscription == os.environ["ARM_SUBSCRIPTION_ID"] and tenant == os.environ["ARM_TENANT_ID"] and
+            account["user"]["type"].lower() == "serviceprincipal" and
+            account["user"]["name"].lower() == os.environ["ARM_CLIENT_ID"].lower(),
+            "Existing online OIDC identity/scope mismatch")
+    context = {"account": os.environ["BACKEND_ACCOUNT"], "container": os.environ["BACKEND_CONTAINER"],
+               "source_sha": os.environ["GITHUB_SHA"], "run_id": os.environ["GITHUB_RUN_ID"],
+               "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"], "identity_verified": True}
+    transport = RequestsTransport(connection_timeout=10, read_timeout=30)
+    pipeline = Pipeline(transport=transport, policies=[BearerTokenCredentialPolicy(credential, "https://storage.azure.com/.default")])
+    def send(method, url, headers, body):
+        request_headers = {"x-ms-version": "2023-11-03", "x-ms-date": formatdate(usegmt=True)}
+        request_headers.update(headers)
+        request = HttpRequest(method, url, headers=request_headers, data=body)
+        response = pipeline.run(request).http_response
+        return response.status_code, {k.lower(): v for k, v in response.headers.items()}, response.body() if method == "GET" else b""
+    try:
+        try:
+            receipt = transport_probe(send, context)
+        except TransportFailure as error:
+            print(json.dumps(error.receipt))
+            raise
+        print(json.dumps(receipt))
+    finally:
+        transport.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=["prepare", "qualify", "plan", "snapshot", "seal", "verify"])
+    parser.add_argument("operation", choices=["prepare", "qualify", "plan", "snapshot", "seal", "verify", "summary", "transport"])
     parser.add_argument("--sha", default=os.environ.get("GITHUB_SHA"))
     args = parser.parse_args()
+    if args.operation == "transport":
+        run_transport()
+        return
     if args.operation == "prepare":
         raw_inputs = {alias: os.environ.get(alias, "") for alias in PRIVATE_INPUTS}
         require(all(value.strip() for value in raw_inputs.values()), "Required private secret input missing")
@@ -398,6 +573,11 @@ def main():
     elif args.operation == "plan":
         result = check_plan(json.loads(Path("tfplan.json").read_text(encoding="utf-8")), binding["upgrade"])
         print(json.dumps(result))
+    elif args.operation == "summary":
+        if is_continuation(binding["upgrade"]):
+            print("One pinned CSE only: existing D8 VM and SAME attached 127-GiB Premium disk retained, Detach. No VM/disk/power change.")
+        else:
+            print("Three objects: existing D4 to D8, SAME attached 127-GiB disk Standard to Premium, Detach; one pinned CSE. Ordered deallocate/update/start; no replacement.")
     elif args.operation == "snapshot":
         Path("baseline.json").write_text(json.dumps(snapshot(binding["upgrade"])), encoding="utf-8")
     elif args.operation == "seal":

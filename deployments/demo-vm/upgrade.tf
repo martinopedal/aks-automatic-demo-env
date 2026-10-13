@@ -1,24 +1,35 @@
 data "azapi_resource" "upgrade_vm" {
-  count       = var.upgrade == null ? 0 : 1
+  count       = local.vm_preservation_enabled ? 1 : 0
   type        = "Microsoft.Compute/virtualMachines@2024-11-01"
-  resource_id = var.upgrade.vm_id
+  resource_id = local.bound_vm_id
   response_export_values = [
     "properties.storageProfile.osDisk", "properties.hardwareProfile.vmSize"
   ]
 }
 
 data "azapi_resource" "upgrade_disk" {
-  count                  = var.upgrade == null ? 0 : 1
+  count                  = local.vm_preservation_enabled ? 1 : 0
   type                   = "Microsoft.Compute/disks@2024-03-02"
-  resource_id            = var.upgrade.os_disk_id
+  resource_id            = local.bound_os_disk_id
   response_export_values = ["sku.name", "properties.diskSizeGB", "managedBy"]
 }
 
 # These are provider-managed actions on ONE existing VM, not new VM objects
 # or shell provisioners. A failed update may leave it deallocated; recovery
 # requires a fresh reviewed plan, never an automatic CLI start.
+locals {
+  legacy_creation_enabled     = var.legacy_clean_machine && var.upgrade == null
+  vm_preservation_enabled     = !local.legacy_creation_enabled
+  existing_vm_id              = "${local.rg_id}/providers/Microsoft.Compute/virtualMachines/vm-${local.name}"
+  bound_vm_id                 = var.upgrade == null ? local.existing_vm_id : var.upgrade.vm_id
+  bound_os_disk_id            = local.vm_preservation_enabled ? (var.upgrade == null ? data.azapi_resource.upgrade_vm[0].output.properties.storageProfile.osDisk.managedDisk.id : var.upgrade.os_disk_id) : null
+  observed_vm_size            = var.upgrade == null ? "Standard_D8s_v5" : var.upgrade.baseline.vm_size
+  observed_disk_sku           = var.upgrade == null ? "Premium_LRS" : var.upgrade.baseline.os_disk_sku
+  upgrade_performance_pending = var.upgrade == null ? false : var.upgrade.baseline.vm_size == "Standard_D4s_v5"
+}
+
 resource "azapi_resource_action" "upgrade_deallocate" {
-  count       = var.upgrade == null ? 0 : 1
+  count       = local.upgrade_performance_pending ? 1 : 0
   type        = "Microsoft.Compute/virtualMachines@2024-11-01"
   resource_id = var.upgrade.vm_id
   action      = "deallocate"
@@ -27,7 +38,7 @@ resource "azapi_resource_action" "upgrade_deallocate" {
 }
 
 resource "azapi_update_resource" "upgrade_disk" {
-  count       = var.upgrade == null ? 0 : 1
+  count       = local.upgrade_performance_pending ? 1 : 0
   type        = "Microsoft.Compute/disks@2024-03-02"
   resource_id = var.upgrade.os_disk_id
   body        = { sku = { name = var.upgrade.os_disk_sku } }
@@ -41,7 +52,7 @@ resource "azapi_update_resource" "upgrade_disk" {
 }
 
 resource "azapi_resource_action" "upgrade_start" {
-  count       = var.upgrade == null ? 0 : 1
+  count       = local.upgrade_performance_pending ? 1 : 0
   type        = "Microsoft.Compute/virtualMachines@2024-11-01"
   resource_id = var.upgrade.vm_id
   action      = "start"

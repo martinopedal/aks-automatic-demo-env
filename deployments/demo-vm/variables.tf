@@ -32,13 +32,29 @@ variable "auto_shutdown_time" {
 
 }
 
+variable "legacy_clean_machine" {
+  description = "Explicit offline compatibility opt-in for the former D4/StandardSSD clean-machine inputs. False preserves the already implemented D8/Premium VM and its current attached disk. This does not authorize legacy writes/reset."
+  type        = bool
+  default     = false
+  nullable    = false
+
+  validation {
+    condition     = !var.legacy_clean_machine || var.upgrade == null
+    error_message = "Legacy clean-machine inputs cannot be combined with a protected upgrade binding."
+  }
+}
+
 variable "upgrade" {
-  description = "Null preserves the legacy clean-machine lane. Non-null is a single reviewed in-place upgrade of the existing VM and exact attached 127-GiB disk; private environment binding, never an import or replacement."
+  description = "Null preserves the implemented D8/Premium VM and current retained disk without a bootstrap or performance action; legacy clean-machine inputs require explicit opt-in. Non-null enables only the separately approved protected delivery binding, never import/replacement."
   type = object({
     vm_id       = string
     os_disk_id  = string
     vm_size     = optional(string, "Standard_D8s_v5")
     os_disk_sku = optional(string, "Premium_LRS")
+    baseline = optional(object({
+      vm_size     = string
+      os_disk_sku = string
+    }), { vm_size = "Standard_D4s_v5", os_disk_sku = "Standard_LRS" })
     bootstrap = object({
       repository      = string
       commit          = string
@@ -55,10 +71,11 @@ variable "upgrade" {
     condition = var.upgrade == null ? true : (
       var.upgrade.vm_size == "Standard_D8s_v5" &&
       var.upgrade.os_disk_sku == "Premium_LRS" &&
+      contains(["Standard_D4s_v5/Standard_LRS", "Standard_D8s_v5/Premium_LRS"], "${var.upgrade.baseline.vm_size}/${var.upgrade.baseline.os_disk_sku}") &&
       can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft.Compute/virtualMachines/vm-demo-copilot$", var.upgrade.vm_id)) &&
       can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft.Compute/disks/[^/]+$", var.upgrade.os_disk_id))
     )
-    error_message = "Upgrade supports only the existing vm-demo-copilot, exact managed OS disk, D8s_v5 and Premium_LRS; no replacement or capacity change."
+    error_message = "Upgrade supports only the same VM and 127-GiB disk: bound D4/Standard performance upgrade or retained D8/Premium bootstrap continuation; no replacement, downgrade or capacity change."
   }
 
   validation {

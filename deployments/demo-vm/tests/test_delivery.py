@@ -1,5 +1,8 @@
 """Offline unit/mutation contracts: synthetic ARM/plan values, no Azure calls."""
 import base64
+import contextlib
+import io
+import sys
 import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -278,7 +281,7 @@ class DeliveryContracts(unittest.TestCase):
             "(github.event_name == 'workflow_dispatch' && inputs.action == 'upgrade'))")
         self.assertEqual(
             jobs["deploy"]["if"],
-            "github.event_name == 'workflow_dispatch' && inputs.action != 'upgrade'")
+            "github.event_name == 'workflow_dispatch' && inputs.action != 'upgrade' && inputs.action != 'qualify-transport'")
         self.assertEqual(jobs["upgrade-plan"]["needs"], "upgrade-policy")
         self.assertEqual(jobs["upgrade-approval"]["needs"], "upgrade-plan")
         self.assertEqual(jobs["upgrade-apply"]["needs"], ["upgrade-plan", "upgrade-approval"])
@@ -293,7 +296,7 @@ class DeliveryContracts(unittest.TestCase):
         self.assertNotIn("DEMO_VM_PLAN_KEY", workflow)
         self.assertIn("demo-vm-plans/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/$GITHUB_SHA/delivery.tar", workflow)
         self.assertIn("environment: demo-vm-upgrade-haflidi", workflow)
-        self.assertEqual(workflow.count("environment: online"), 3)
+        self.assertEqual(workflow.count("environment: online"), 4)
         self.assertIn("terraform apply -input=false tfplan", workflow)
         self.assertIn("PRIVATE_TRANSPORT_ACCEPTED", workflow)
         self.assertIn("if: inputs.action != 'plan'", workflow)
@@ -304,7 +307,7 @@ class DeliveryContracts(unittest.TestCase):
 
     def test_offline_lane_is_platform_locked_and_has_no_live_bindings(self):
         workflow = (ROOT.parents[1] / ".github" / "workflows" / "deploy-demo-vm.yml").read_text(encoding="utf-8")
-        offline = workflow.split("  offline:", 1)[1].split("  upgrade-policy:", 1)[0]
+        offline = workflow.split("  offline:", 1)[1].split("  transport-qualification:", 1)[0]
         for setting in ('ARM_USE_OIDC: false', 'ARM_CLIENT_ID: ""', 'ARM_TENANT_ID: ""',
                         'ARM_SUBSCRIPTION_ID: ""', 'TF_VAR_entra_admin_object_ids: "[]"',
                         'TF_VAR_bastion_user_object_ids: "[]"', '-lockfile=readonly'):
@@ -324,6 +327,185 @@ class DeliveryContracts(unittest.TestCase):
             self.assertIn(field, template)
         self.assertNotIn("winget", template.lower())
         self.assertNotIn("ExecutionPolicy", template)
+
+
+
+
+def continuation_binding():
+    b = binding()
+    b["upgrade"]["baseline"] = {"vm_size": "Standard_D8s_v5", "os_disk_sku": "Premium_LRS"}
+    return b
+
+
+def continuation_plan():
+    p = plan()
+    p["resource_changes"] = [r for r in p["resource_changes"] if r["address"] in (guard.VM, guard.CSE)]
+    vm = next(r["change"] for r in p["resource_changes"] if r["address"] == guard.VM)
+    vm["actions"] = ["no-op"]
+    vm["after"]["body"]["properties"]["storageProfile"]["osDisk"]["managedDisk"]["storageAccountType"] = "Premium_LRS"
+    vm["before"] = copy.deepcopy(vm["after"])
+    return p
+
+
+class ContinuationContracts(unittest.TestCase):
+    def test_exact_retained_d8_premium_cse_only(self):
+        b = continuation_binding()
+        self.assertEqual(guard.check_plan(continuation_plan(), b["upgrade"]),
+                         {"objects": 1, "actions": 0, "replacement": False, "disk_capacity_change": False})
+        e, r = evidence(b, NOW), cost_receipt(b, NOW)
+        guard.qualify(b, e, SHA, NOW, r)
+
+    def test_unsupported_or_unbound_baseline_rejected(self):
+        for baseline in ({"vm_size": "Standard_D8s_v5", "os_disk_sku": "Standard_LRS"},
+                         {"vm_size": "Standard_D4s_v5", "os_disk_sku": "Premium_LRS"},
+                         {"vm_size": "Standard_D16s_v5", "os_disk_sku": "Premium_LRS"}, {}):
+            b = continuation_binding(); b["upgrade"]["baseline"] = baseline
+            with self.subTest(baseline=baseline), self.assertRaisesRegex(ValueError, "baseline"):
+                guard.delivery_baseline(b["upgrade"])
+        b = continuation_binding(); e, r = evidence(b, NOW), cost_receipt(b, NOW)
+        b["upgrade"]["baseline"] = {"vm_size": "Standard_D4s_v5", "os_disk_sku": "Standard_LRS"}
+        with self.assertRaisesRegex(ValueError, "binding hash"):
+            guard.qualify(b, e, SHA, NOW, r)
+
+    def test_plan_indirect_disk_loss_swap_capacity_unknown_and_vm_changes_rejected(self):
+        cases = [
+            ("delete_option", lambda c: c["after"]["body"]["properties"]["storageProfile"]["osDisk"].update(deleteOption="Delete"), "indirect disk loss"),
+            ("disk_swap", lambda c: c["after"]["body"]["properties"]["storageProfile"]["osDisk"]["managedDisk"].update(id=DISK_ID+"-other"), "disk identity"),
+            ("capacity", lambda c: c["after"]["body"]["properties"]["storageProfile"]["osDisk"].update(diskSizeGB=128), "capacity"),
+            ("downgrade", lambda c: c["after"]["body"]["properties"]["storageProfile"]["osDisk"]["managedDisk"].update(storageAccountType="Standard_LRS"), "semantics/SKU"),
+            ("vm_swap", lambda c: c["after"].update(id=VM_ID+"-other"), "VM ID"),
+            ("foreign_body", lambda c: c["after"]["body"]["properties"].update(licenseType="Windows_Server"), "body changed"),
+            ("unknown_body", lambda c: c.update(after_unknown={"body": {"properties": {"storageProfile": True}}}), "Unknown VM"),
+            ("unknown_id", lambda c: c.update(after_unknown={"id": True}), "Unknown critical"),
+        ]
+        for label, mutation, message in cases:
+            p = continuation_plan(); vm = next(r["change"] for r in p["resource_changes"] if r["address"] == guard.VM)
+            mutation(vm)
+            with self.subTest(case=label), self.assertRaisesRegex(ValueError, message):
+                guard.check_plan(p, continuation_binding()["upgrade"])
+        # Even a purported no-op with BOTH bodies set to Delete cannot hide indirect loss.
+        p = continuation_plan(); vm = p["resource_changes"][0]["change"]
+        for side in ("before", "after"):
+            vm[side]["body"]["properties"]["storageProfile"]["osDisk"]["deleteOption"] = "Delete"
+        with self.assertRaisesRegex(ValueError, "indirect disk loss"):
+            guard.check_plan(p, continuation_binding()["upgrade"])
+
+    def test_continuation_rejects_vm_replacement_power_disk_and_foreign_deltas(self):
+        for actions in (["update"], ["delete", "create"], ["create"]):
+            p = continuation_plan(); p["resource_changes"][0]["change"]["actions"] = actions
+            with self.subTest(actions=actions), self.assertRaises(ValueError):
+                guard.check_plan(p, continuation_binding()["upgrade"])
+        for address in (guard.DISK, guard.STOP, guard.START, "azapi_resource.foreign"):
+            p = continuation_plan(); p["resource_changes"].append({"mode": "managed", "address": address,
+                                                                "change": {"actions": ["create"]}})
+            with self.subTest(address=address), self.assertRaisesRegex(ValueError, "outside bootstrap-only"):
+                guard.check_plan(p, continuation_binding()["upgrade"])
+        p = continuation_plan(); p["resource_changes"][1]["change"]["actions"] = ["delete", "create"]
+        with self.assertRaisesRegex(ValueError, "Delete/replacement"):
+            guard.check_plan(p, continuation_binding()["upgrade"])
+
+    def test_legacy_indirect_disk_delete_swap_and_capacity_rejected(self):
+        for mutation, message in (
+            (lambda d: d.update(deleteOption="Delete"), "retention"),
+            (lambda d: d["managedDisk"].update(id=DISK_ID+"-swap"), "retained disk"),
+            (lambda d: d.update(diskSizeGB=128), "capacity")):
+            p = plan(); disk = p["resource_changes"][0]["change"]["after"]["body"]["properties"]["storageProfile"]["osDisk"]
+            mutation(disk)
+            with self.assertRaisesRegex(ValueError, message): guard.check_plan(p, binding()["upgrade"])
+
+    def test_continuation_snapshot_binds_retention_identity_capacity_and_sku(self):
+        b = continuation_binding(); vm = {"id": VM_ID, "properties": copy.deepcopy(continuation_plan()["resource_changes"][0]["change"]["after"]["body"]["properties"])}
+        disk = {"id": DISK_ID, "managedBy": VM_ID, "properties": {"diskSizeGB": 127}, "sku": {"name": "Premium_LRS"}}
+        with patch.object(guard.subprocess, "check_output", side_effect=[json.dumps(vm), json.dumps(disk)]):
+            self.assertEqual(set(guard.snapshot(b["upgrade"])), {"vm", "disk"})
+        for key, value in (("deleteOption", "Delete"), ("createOption", "Attach")):
+            bad = copy.deepcopy(vm); bad["properties"]["storageProfile"]["osDisk"][key] = value
+            with patch.object(guard.subprocess, "check_output", side_effect=[json.dumps(bad), json.dumps(disk)]), self.assertRaisesRegex(ValueError, "indirect disk loss"):
+                guard.snapshot(b["upgrade"])
+        for mutation in (lambda d: d["properties"].update(diskSizeGB=128), lambda d: d.update(managedBy=VM_ID+"-other")):
+            bad = copy.deepcopy(disk); mutation(bad)
+            with patch.object(guard.subprocess, "check_output", side_effect=[json.dumps(vm), json.dumps(bad)]), self.assertRaisesRegex(ValueError, "Live disk baseline"):
+                guard.snapshot(b["upgrade"])
+
+    def test_continuation_still_requires_genuine_owner_cost_system_licensing(self):
+        b = continuation_binding(); r = cost_receipt(b, NOW)
+        for field in ("owner", "downtime_accepted", "system_payload_accepted", "budget_accepted", "quota_accepted", "windows_client_eligibility_accepted", "all_subscription_coverage"):
+            e = evidence(b, NOW); e[field] = "other" if field == "owner" else False
+            with self.subTest(field=field), self.assertRaises(ValueError): guard.qualify(b, e, SHA, NOW, r)
+        with self.assertRaisesRegex(ValueError, "receipt"): guard.qualify(b, evidence(b, NOW), SHA, NOW)
+        b["upgrade"]["bootstrap"]["system_accepted"] = False
+        with self.assertRaisesRegex(ValueError, "SYSTEM"): guard.qualify(b, evidence(b, NOW), SHA, NOW, cost_receipt(b, NOW))
+
+
+class TransportContracts(unittest.TestCase):
+    def context(self):
+        # Synthetic offline fixture only; not actual OIDC proof or owner acceptance.
+        return {"account": "stonlinedemotfst01", "container": "tfstate", "source_sha": SHA,
+                "run_id": "123", "run_attempt": "1", "identity_verified": True}
+
+    def sender(self, mode=None):
+        calls = []; payload = {}; etag = '\"synthetic-etag\"'
+        def send(method, url, headers, body):
+            calls.append((method, url, headers, body))
+            if url.endswith("?restype=container"):
+                return (200, {"x-ms-blob-public-access": "blob"} if mode == "public" else {}, b"")
+            if method == "PUT":
+                self.assertEqual(headers["If-None-Match"], "*")
+                payload["bytes"] = body
+                return (409 if mode == "collision" else 201, {"etag": etag}, b"")
+            if method == "GET":
+                self.assertEqual(headers["If-Match"], etag)
+                return (200, {"etag": etag}, b"different" if mode == "hash" else payload["bytes"])
+            if method == "DELETE":
+                self.assertEqual(headers["If-Match"], etag)
+                return (412 if mode == "cleanup" else 202, {}, b"")
+            if method == "HEAD": return (404, {}, b"")
+            raise AssertionError("Unexpected operation")
+        return send, calls
+
+    def test_synthetic_exact_object_create_hash_conditional_cleanup(self):
+        send, calls = self.sender(); receipt = guard.transport_probe(send, self.context(), "a"*32)
+        self.assertTrue(receipt["success"])
+        self.assertEqual([c[0] for c in calls], ["HEAD", "PUT", "GET", "DELETE", "HEAD"])
+        blob_calls = calls[1:]; self.assertEqual(len({c[1] for c in blob_calls}), 1)
+        self.assertIn('/demo-vm-plans/123/1/'+SHA+'/transport-check-'+'a'*32+'.txt', blob_calls[0][1])
+        self.assertNotIn("tfstate", receipt["blob_name"])
+
+    def test_access_collision_hash_cleanup_failures_are_nonzero_and_do_not_delete_others(self):
+        for mode in ("public", "collision", "hash", "cleanup"):
+            send, calls = self.sender(mode)
+            with self.subTest(mode=mode), self.assertRaises(guard.TransportFailure) as error:
+                guard.transport_probe(send, self.context(), "b"*32)
+            self.assertFalse(error.exception.receipt["success"])
+            if mode in ("public", "collision"): self.assertFalse(any(c[0] == "DELETE" for c in calls))
+            if mode == "hash": self.assertTrue(error.exception.receipt["delete_verified"])
+            if mode == "cleanup": self.assertTrue(error.exception.receipt["cleanup_failed"])
+
+    def test_unbound_context_identity_or_foreign_backend_blocks_before_any_write(self):
+        for key, value in (("source_sha", "main"), ("run_id", "../other"), ("identity_verified", False), ("account", "other"), ("container", "other")):
+            context = self.context(); context[key] = value; send, calls = self.sender()
+            with self.subTest(field=key), self.assertRaises(ValueError): guard.transport_probe(send, context, "c"*32)
+            self.assertEqual(calls, [])
+
+    def test_transport_cli_never_reads_owner_files_or_runs_terraform(self):
+        with patch.object(guard, "run_transport") as probe, patch.object(guard, "qualify", side_effect=AssertionError("owner path forbidden")), \
+                patch.object(guard.Path, "read_text", side_effect=AssertionError("file path forbidden")), \
+                patch.object(sys, "argv", ["delivery_guard.py", "transport"]):
+            guard.main()
+        probe.assert_called_once_with()
+
+    def test_workflow_probe_is_main_online_only_no_vm_or_terraform_no_circular_flag(self):
+        workflow = yaml.safe_load((ROOT.parents[1]/".github/workflows/deploy-demo-vm.yml").read_text(encoding="utf-8"))
+        job = workflow["jobs"]["transport-qualification"]
+        self.assertEqual(job["environment"], "online")
+        self.assertEqual(job["if"], "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.action == 'qualify-transport'")
+        self.assertEqual(job["runs-on"], ["self-hosted", "aks-online-demo"])
+        commands = "\n".join(s.get("run", "") for s in job["steps"])
+        for forbidden in ("terraform", "az vm", "az disk", "PRIVATE_TRANSPORT_ACCEPTED", "delivery_guard.py prepare", "registration-token"):
+            self.assertNotIn(forbidden, commands)
+        self.assertIn("scripts/delivery_guard.py transport", commands)
+        self.assertIn("demo-vm-transport-qualification", workflow["concurrency"]["group"])
+        self.assertIn("'deploy-demo-vm'", workflow["concurrency"]["group"])
 
 
 if __name__ == "__main__":
