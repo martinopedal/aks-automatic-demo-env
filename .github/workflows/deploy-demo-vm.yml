@@ -161,7 +161,7 @@ jobs:
           { terraform test -filter=tests/upgrade.tftest.hcl &&
             python3 -m unittest discover -s tests -p 'test_*.py'; } > contracts.log 2>&1 || { echo "::error::Private configuration contracts blocked; inspect private runner evidence"; exit 1; }
       - name: Azure Login (unchanged online OIDC trust)
-        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID_ONLINE }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -252,7 +252,7 @@ jobs:
         with:
           terraform_version: "1.16.5"
           terraform_wrapper: false
-      - uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID_ONLINE }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -338,7 +338,7 @@ jobs:
           az version
 
       - name: Azure Login (OIDC)
-        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43  # v3.0.0
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID_ONLINE }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
