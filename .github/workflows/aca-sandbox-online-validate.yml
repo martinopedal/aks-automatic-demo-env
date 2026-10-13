@@ -1,0 +1,83 @@
+name: ACA Sandbox Online - create, validate, audit, delete
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aca-sandbox-online-validate
+  cancel-in-progress: false
+
+env:
+  ACA_SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID_ONLINE }}
+  ACA_RESOURCE_GROUP: rg-aca-sandboxes-online-swc-001
+  ACA_SANDBOX_GROUP: sbg-squad-nic2026-online-swc-001
+  FIXTURE_REPO: martinopedal/squad-terraform-session-2026-10-14
+  FIXTURE_COMMIT: 37a3a404a4c2d6ae5a7d609814c5f3e1a4935e27
+  FIXTURE_SHA256: 75d8fc0f08005317bbdc21c8de9ad43f3b7e06736e419014e7cf8678b9cab2a5
+
+jobs:
+  validate:
+    name: One sandbox - fixture, result JSON, egress audit, exact-ID delete
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: online
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Azure login (OIDC, online environment)
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID_ONLINE }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID_ONLINE }}
+
+      - name: Install aca CLI and fetch pinned public fixture
+        run: |
+          set -euo pipefail
+          curl -fsSL https://aka.ms/aca-cli-install | sh
+          echo "$HOME/.aca/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.aca/bin:$PATH"
+          aca --version
+          curl -fsSL "https://raw.githubusercontent.com/${FIXTURE_REPO}/${FIXTURE_COMMIT}/docs/fixtures/native-validation.sh" -o native-validation.sh
+          echo "${FIXTURE_SHA256}  native-validation.sh" | sha256sum -c -
+
+      - name: Create exactly one sandbox, validate, audit egress
+        id: run
+        run: |
+          set -euo pipefail
+          aca sandboxgroup get --name "$ACA_SANDBOX_GROUP" -o json > group.json
+          python3 -c "import json;g=json.load(open('group.json'));print('group',g.get('name'),g.get('location'))"
+          aca sandbox create --group "$ACA_SANDBOX_GROUP" --disk ubuntu --cpu 1000m --memory 2048Mi \
+            --egress-default Deny --traffic-inspection Full --label run=${{ github.run_id }} --wait-timeout 90 -o json > create.json
+          ID=$(python3 -c "import json;print(json.load(open('create.json'))['id'])")
+          echo "$ID" | grep -Eq '^[0-9a-f-]{36}$'
+          echo "sandbox_id=$ID" >> "$GITHUB_OUTPUT"
+          echo "Created sandbox $ID"
+          aca sandbox fs write --group "$ACA_SANDBOX_GROUP" --id "$ID" --path /root/native-validation.sh --file native-validation.sh
+          aca sandbox exec --group "$ACA_SANDBOX_GROUP" --id "$ID" -c "sh /root/native-validation.sh" | tee exec.out
+          aca sandbox fs cat --group "$ACA_SANDBOX_GROUP" --id "$ID" --path /root/native-result.json > result.json
+          python3 - <<'PY'
+          import json
+          r = json.load(open('result.json'))
+          assert r['schema'] == 'native-squad-validation-v1', r
+          assert all(r['checks'].values()), r
+          print('result JSON ok', json.dumps(r['checks']))
+          PY
+          aca sandbox exec --group "$ACA_SANDBOX_GROUP" --id "$ID" \
+            -c "curl -s -o /dev/null -w 'probe_http=%{http_code}\n' --max-time 20 https://example.com || echo probe_blocked" | tee probe.out
+          aca sandbox egress decisions --group "$ACA_SANDBOX_GROUP" --id "$ID" | tee decisions.out
+          grep -qi 'example.com' decisions.out
+
+      - name: Delete exactly the created sandbox
+        if: always() && steps.run.outputs.sandbox_id != ''
+        run: |
+          set -euo pipefail
+          ID='${{ steps.run.outputs.sandbox_id }}'
+          aca sandbox delete --group "$ACA_SANDBOX_GROUP" --id "$ID" --yes || aca sandbox delete --group "$ACA_SANDBOX_GROUP" --id "$ID"
+          aca sandbox list --group "$ACA_SANDBOX_GROUP" -o json > after.json
+          python3 -c "import json,sys;l=json.load(open('after.json'));l=l if isinstance(l,list) else l.get('value',l.get('items',[]));assert not any(s.get('id')=='$ID' for s in l),'still present';print('deleted $ID; remaining',len(l))"
