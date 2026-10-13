@@ -253,10 +253,9 @@ $tests = [ordered]@{
         & "$PSScriptRoot\Restore-DemoVm.ps1" -Subscription $subscription -SnapshotName baseline -WhatIf | Out-Null
         Assert-True ((Get-Mutations).Count -eq 0) 'Restore WhatIf mutated Azure.'
     }
-    'Snapshot restore creates SSD even for an HDD source' = {
-        $global:DemoVmDiskTest.disks[$originalId]['sku']['name'] = 'Standard_LRS'
+    'Snapshot restore matches attached SSD regardless of snapshot storage tier' = {
         $result = & "$PSScriptRoot\Restore-DemoVm.ps1" -Subscription $subscription -SnapshotName baseline -DiskName restored -Confirm:$false
-        Assert-True ($result.DiskSku -eq 'StandardSSD_LRS') 'HDD source was not restored to SSD by default.'
+        Assert-True ($result.DiskSku -eq 'StandardSSD_LRS') 'Restore did not match the attached SSD disk.'
         Assert-True ($global:DemoVmDiskTest.disks[$originalId]['diskState'] -eq 'Unattached') 'Old disk was not retained.'
         Assert-True ($global:DemoVmDiskTest.disks[$originalId]['tags']['DemoSourceVmId'] -eq $vmId) 'Rollback disk is missing provenance.'
         Assert-True ($result.PowerState -eq 'PowerState/deallocated') 'Restore did not remain deallocated.'
@@ -287,12 +286,29 @@ $tests = [ordered]@{
         Assert-True ((Get-Mutations).Count -eq 1) 'The incompatible copy performed mutations beyond disk creation.'
         Assert-True (@($global:DemoVmDiskTest.requests | Where-Object { ($_[0..1] -join ' ') -eq 'vm update' }).Count -eq 0) 'An incompatible copy was swapped in.'
     }
-    'Explicit HDD and Premium SKU overrides are honored' = {
-        foreach ($sku in @('Standard_LRS', 'Premium_LRS')) {
+    'New-disk defaults match all supported attached disk SKUs' = {
+        foreach ($sku in @('Standard_LRS', 'StandardSSD_LRS', 'Premium_LRS')) {
             Reset-Fixture
-            $result = & "$PSScriptRoot\Restore-DemoVm.ps1" -Subscription $subscription -SnapshotName baseline -DiskName restored -DiskSku $sku -Confirm:$false
-            Assert-True ($result.DiskSku -eq $sku) 'SKU override was ignored.'
+            $global:DemoVmDiskTest.disks[$originalId]['sku']['name'] = $sku
+            $result = & "$PSScriptRoot\Restore-DemoVm.ps1" -Subscription $subscription -SnapshotName baseline -DiskName restored -Confirm:$false
+            Assert-True ($result.DiskSku -eq $sku) "Restore did not default to attached disk SKU '$sku'."
+            $create = @($global:DemoVmDiskTest.requests | Where-Object { ($_[0..1] -join ' ') -eq 'disk create' })[0]
+            Assert-True ((Get-FixtureArgument $create '--sku') -eq $sku) 'Disk creation did not receive the resolved SKU.'
         }
+    }
+    'Explicit SKU overrides take precedence over attached Premium tier' = {
+        foreach ($sku in @('Standard_LRS', 'StandardSSD_LRS', 'Premium_LRS')) {
+            Reset-Fixture
+            $global:DemoVmDiskTest.disks[$originalId]['sku']['name'] = 'Premium_LRS'
+            $result = & "$PSScriptRoot\Restore-DemoVm.ps1" -Subscription $subscription -SnapshotName baseline -DiskName restored -DiskSku $sku -Confirm:$false
+            Assert-True ($result.DiskSku -eq $sku) 'Explicit SKU override was ignored.'
+        }
+    }
+    'Premium default appears in snapshot preview without writes' = {
+        $global:DemoVmDiskTest.disks[$originalId]['sku']['name'] = 'Premium_LRS'
+        $messages = & "$PSScriptRoot\Restore-DemoVm.ps1" -Subscription $subscription -SnapshotName baseline -WhatIf 6>&1 | Out-String
+        Assert-True ($messages -match 'New-disk default: Premium_LRS' -and $messages -match 'new disk tier: Premium_LRS') 'Premium default was not shown before confirmation.'
+        Assert-True ((Get-Mutations).Count -eq 0) 'Premium preview mutated Azure.'
     }
     'Unsupported tier and non-Premium VM fail before shutdown' = {
         $global:DemoVmDiskTest.premium = 'False'
@@ -301,6 +317,7 @@ $tests = [ordered]@{
         Assert-True ((Get-Mutations).Count -eq 0) 'Unsupported tier mutated Azure.'
     }
     'Existing HDD rollback changes no tier and creates no disk' = {
+        $global:DemoVmDiskTest.disks[$originalId]['sku']['name'] = 'Premium_LRS'
         $id = "$groupId/providers/Microsoft.Compute/disks/rollback"
         $global:DemoVmDiskTest.disks[$id] = New-FixtureDisk $id 'Standard_LRS'
         $result = & "$PSScriptRoot\Restore-DemoVm.ps1" -Subscription $subscription -OsDiskId $id -Confirm:$false

@@ -4,8 +4,9 @@
     Restore the demo VM from a snapshot or retained compatible OS disk.
 .DESCRIPTION
     With no source, offers a numbered picker of this VM's snapshots and
-    unattached OS disks. New disks default to StandardSSD_LRS. Existing
-    disks keep their tier. Keeps the previous disk and leaves the VM
+    unattached OS disks. New disks default to the currently attached OS
+    disk's SKU unless -DiskSku is supplied. Existing disks keep their
+    tier. Keeps the previous disk and leaves the VM
     deallocated. Do not run Terraform apply/recreate/destroy until the
     local OS-disk change is manually reconciled.
     Prints phase/status messages and elapsed time. Add -Verbose for CLI
@@ -28,7 +29,7 @@ param(
     [Parameter(ParameterSetName = 'Picker')][string]$DiskName,
     [Parameter(ParameterSetName = 'Snapshot')]
     [Parameter(ParameterSetName = 'Picker')]
-    [ValidateSet('Standard_LRS', 'StandardSSD_LRS', 'Premium_LRS')][string]$DiskSku = 'StandardSSD_LRS'
+    [ValidateSet('Standard_LRS', 'StandardSSD_LRS', 'Premium_LRS')][string]$DiskSku
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'DemoVmDisk.Common.ps1')
@@ -36,6 +37,14 @@ $operationTimer = [Diagnostics.Stopwatch]::StartNew()
 Write-DemoStatus 'Restore' "Preparing OS-disk restore for '$VmName'..."
 
 $context = Get-DemoDiskContext $Subscription $ResourceGroup $VmName
+if ($PSCmdlet.ParameterSetName -ne 'Disk') {
+    if (-not $PSBoundParameters.ContainsKey('DiskSku')) {
+        $DiskSku = $context.Disk['sku']['name']
+        Write-DemoStatus 'Disk SKU' "New-disk default: $DiskSku (currently attached OS disk)."
+    } else {
+        Write-DemoStatus 'Disk SKU' "New-disk tier: $DiskSku (explicit override)."
+    }
+}
 $snapshot = $null
 if ($SnapshotName) {
     Assert-DemoResourceName $SnapshotName

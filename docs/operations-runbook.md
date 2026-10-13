@@ -27,7 +27,7 @@ $env:AZURE_SUBSCRIPTION_ID_ONLINE = '<set in your shell only>'
 | `scripts/Connect-DemoVm.ps1` | Opens a native RDP session through Bastion with Entra sign-in and MFA, or with a local account (`-LocalAccount`, for guests). |
 | `scripts/Set-GuestLocalLogin.ps1` | Creates or resets a guest presenter's local VM account; the generated password goes only to the operator's clipboard. |
 | `scripts/Snapshot-DemoVm.ps1` | Cleanly shuts down and deallocates the demo VM, then saves a specialized OS-disk snapshot. Leaves the VM deallocated. Supports `-WhatIf`. |
-| `scripts/Restore-DemoVm.ps1` | Offers a snapshot/retained-disk picker or accepts an explicit source. Creates a Standard SSD disk from a snapshot by default, swaps the OS disk, and retains the previous disk for rollback. Leaves the VM deallocated. |
+| `scripts/Restore-DemoVm.ps1` | Offers a snapshot/retained-disk picker or accepts an explicit source. New disks default to the currently attached OS disk's SKU unless overridden. Swaps the OS disk and retains the previous disk for rollback. Leaves the VM deallocated. |
 | `scripts/Test-DemoVmDiskScripts.ps1` | Runs offline regression scenarios with a mocked Azure CLI. Does not access Azure or require an external test framework. |
 
 `Invoke-GatedRun.ps1` approves on your behalf. Run it only for a change you have already reviewed.
@@ -117,7 +117,9 @@ The picker lists saved OS snapshots and compatible unattached OS disks attributa
 
 It verifies provenance through VM/instance tags or the disk/snapshot source-ID chain, not similar names. Untagged resources used by the current VM can appear when their lineage is verifiable. It excludes unrelated/unverifiable resources, attached disks, and incompatible resources. Blank input cancels; an empty list or invalid choice makes no changes.
 
-Choosing a snapshot creates a new **`StandardSSD_LRS`** disk, even if the source disk was HDD. Snapshot storage is separate from the restored disk's storage tier. Choosing an existing disk uses it unchanged, including its storage tier. To replace HDD with SSD, select a snapshot and create a new disk instead.
+Choosing a snapshot creates a new disk using the **currently attached OS disk's SKU** by default, regardless of the snapshot's storage tier or the tier used when it was captured. For example, an attached `Premium_LRS` disk makes new restores Premium, even from an older snapshot. Use `-DiskSku` to select another supported tier explicitly.
+
+Snapshot storage remains `Standard_LRS`, independent of the restored disk's tier. Choosing an existing disk uses it unchanged, including its storage tier. To change that tier through this restore procedure, select a snapshot and create a new disk with the desired `-DiskSku` instead.
 
 For explicit selection or automation:
 
