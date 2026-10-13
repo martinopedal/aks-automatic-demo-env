@@ -82,6 +82,13 @@ The workflow rejects `github.actor == haflidif` before any Azure job:
 the sole reviewer cannot approve his own deployment. A different authorized
 actor must initiate a new source-qualified run; rerunning the same initiator
 or weakening self-review protection is not a workaround.
+If Haflidi merged the PR, Martin or another authorized non-Haflidi user must
+open **Actions → Deploy Demo VM → Run workflow**, select branch **main** and
+action **upgrade**. This starts a new run for the current main source through
+the same fresh private plan, qualification and approval gates; it does not
+reuse the failed run or enter the legacy dispatch lane. Refresh the private
+source-bound qualification inputs for that source/run as needed before dispatch.
+Upgrade dispatches from any other branch or tag cannot enter the delivery lane.
 Two self-hosted `aks-online-demo` job executions must be available, including
 one after approvals; a one-shot runner completing the plan does not supply the
 apply runner. The concurrency group excludes legacy/upgrade overlap.
