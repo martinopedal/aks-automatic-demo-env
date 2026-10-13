@@ -1,6 +1,6 @@
 name: "Deploy Demo VM"
 
-# Legacy clean-machine dispatch remains separate. Main merges queue a fresh
+# Legacy clean-machine dispatch remains separate. Main merges/upgrade dispatches queue a fresh
 # private saved plan, Haflidi's exact-plan gate, then the existing online gate.
 # No GitHub plan/state artifacts, new identities or new trust configuration.
 #
@@ -22,11 +22,11 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "plan | apply | recreate-vm (reset to a clean machine) | destroy"
+        description: "upgrade (protected main delivery) | plan | apply | recreate-vm (reset to a clean machine) | destroy"
         required: true
         default: plan
         type: choice
-        options: [plan, apply, recreate-vm, destroy]
+        options: [plan, upgrade, apply, recreate-vm, destroy]
 
 permissions:
   contents: read
@@ -107,7 +107,7 @@ jobs:
 
   upgrade-policy:
     name: Verify actual Haflidi gate
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.action == 'upgrade'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -305,7 +305,7 @@ jobs:
   deploy:
     name: Demo VM ${{ inputs.action }}
     runs-on: [self-hosted, aks-online-demo]
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.action != 'upgrade'
     permissions:
       id-token: write
       contents: read

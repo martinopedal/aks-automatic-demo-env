@@ -11,8 +11,10 @@ def api(path):
 def check_initiator(actor):
     if actor.lower() == "haflidif":
         raise ValueError("Haflidi cannot initiate and approve his own protected deployment. "
-                         "Have Martin/another authorized non-Haflidi actor initiate a new "
-                         "source-qualified main run; no self-review fallback or VM change.")
+                         "Have Martin/another authorized non-Haflidi actor dispatch Deploy Demo VM "
+                         "on main with action=upgrade for a fresh source-qualified run; "
+                         "rerunning this run does not change its initiator. "
+                         "No self-review fallback or VM change.")
 
 
 def check(environment, policies, haflidi_id):

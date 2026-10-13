@@ -11,6 +11,8 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -259,8 +261,31 @@ class DeliveryContracts(unittest.TestCase):
 
     def test_haflidi_cannot_initiate_self_approval(self):
         policy.check_initiator("martinopedal")
-        with self.assertRaisesRegex(ValueError, "cannot initiate and approve"):
-            policy.check_initiator("haflidif")
+        for actor in ("haflidif", "HaflidiF"):
+            with self.subTest(actor=actor), self.assertRaisesRegex(ValueError, "action=upgrade"):
+                policy.check_initiator(actor)
+
+    def test_upgrade_dispatch_uses_main_only_protected_lane(self):
+        workflow = yaml.safe_load(
+            (ROOT.parents[1] / ".github" / "workflows" / "deploy-demo-vm.yml").read_text(encoding="utf-8"))
+        action = workflow[True]["workflow_dispatch"]["inputs"]["action"]
+        self.assertIn("upgrade", action["options"])
+        self.assertEqual(action["default"], "plan")
+        jobs = workflow["jobs"]
+        self.assertEqual(
+            jobs["upgrade-policy"]["if"],
+            "github.ref == 'refs/heads/main' && (github.event_name == 'push' || "
+            "(github.event_name == 'workflow_dispatch' && inputs.action == 'upgrade'))")
+        self.assertEqual(
+            jobs["deploy"]["if"],
+            "github.event_name == 'workflow_dispatch' && inputs.action != 'upgrade'")
+        self.assertEqual(jobs["upgrade-plan"]["needs"], "upgrade-policy")
+        self.assertEqual(jobs["upgrade-approval"]["needs"], "upgrade-plan")
+        self.assertEqual(jobs["upgrade-apply"]["needs"], ["upgrade-plan", "upgrade-approval"])
+        for job in ("upgrade-policy", "upgrade-approval"):
+            self.assertTrue(any(
+                step.get("run") == "python3 deployments/demo-vm/scripts/check_environment.py"
+                for step in jobs[job]["steps"]))
 
     def test_actual_workflow_no_public_plan_or_improvised_key(self):
         workflow = (ROOT.parents[1] / ".github" / "workflows" / "deploy-demo-vm.yml").read_text(encoding="utf-8")
